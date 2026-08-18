@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.bak_*
+.env
+# Live unit configuration with real secrets (F-04). Never commit, never push.
+oceankind.env
+/dashboard/
+legacy/build-artifacts/

@@ -1,0 +1,14 @@
+# OceanKind - Python dependencies
+# Install on Raspberry Pi with:
+#   pip install -r requirements.txt --break-system-packages
+
+sounddevice>=0.4.6      # Audio capture (PortAudio wrapper)
+numpy>=1.24             # Array processing
+scipy>=1.10             # FFT, WAV file writing
+paho-mqtt>=2.0          # MQTT alert publishing (local broker, dev/testing)
+requests>=2.31          # HTTP alert posting
+RPi.GPIO>=0.7           # GPIO (for future LED/buzzer status indicators)
+
+# Azure IoT Hub — required when OCEANKIND_ALERT_METHOD=iothub
+# Comment out if not using Project 15 / Azure (saves ~10MB on Pi)
+azure-iot-device>=2.12  # Azure IoT Hub device client (includes built-in retry)

@@ -1,0 +1,15 @@
+# OceanKind device — production dependencies (src/marfutura_iot_audio.py)
+#
+# This is the PRODUCTION set. The offline tools in tools/ additionally need
+# librosa, scikit-learn and joblib — do NOT install those on the device;
+# they are workstation-only and heavy for a 512 MB bench unit.
+#
+# zoneinfo, wave, csv, urllib are stdlib. arecord comes from alsa-utils (apt).
+
+numpy>=1.24
+scipy>=1.10           # Welch PSD + find_peaks (detector psd_tonal)
+sounddevice>=0.4.6    # continuous capture (PortAudio); needs apt libportaudio2
+azure-storage-blob>=12.19
+azure-iot-device>=2.12
+twilio>=8.0
+pyserial>=3.5         # Victron VE.Direct telemetry
