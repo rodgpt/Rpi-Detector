@@ -1,46 +1,25 @@
 # Data contract v2
 
-**Status: AS-BUILT on the device (2026-08-13, D-016).** The device emits this contract, and only this contract, to a **new storage container** — verified end to end by `raspberry-pi/tools/v2_conformance_test.py`, which drives the production emit code and passes `tools/validate_contract.py`. The prototypes' old blob stays frozen on v1 (its final shape is the "Superseded" section below); the dashboard keeps reading it unchanged until its v2 reader exists. **There is no migration** — new fleet, new storage, clean start.
+**Status: NORMATIVE. v2 is the only contract, and it is the build target for both codebases.**
+
+The device emits it, verified end to end by `raspberry-pi/tools/v2_conformance_test.py`, which drives the production emit code and passes `tools/validate_contract.py`. The dashboard backend reads it and nothing else.
+
+**There is no v1 anywhere in the build.** The prototype units' old blob is frozen, in a different container, and is not read by anything we ship. No dual-write, no migration, no compatibility layer, no normalization on the way in. If code in either repository transforms an older shape, that code is out of date, not this document.
 
 Derived by walking the five dashboard tabs, listing every field each one consumes, and working backwards. Client has confirmed the blob shape is ours to define.
 
-Last updated 2026-08-13.
+Last updated 2026-08-22.
 
-**Device-side implementation notes (normative for consumers):**
+**Implementation notes, normative for consumers:**
 
 - Event blob filenames are `{YYYY-MM-DDTHH-MM-SS}_{uuid4}.json` (capture time, dashes); clips are `{uuid4}.wav`. Both under date partitions derived from `captured_utc`.
-- The `health` block carries four fields beyond the schema below — `deaf_seconds_total`, `suppressed_count`, `events_dropped`, `wa_pending`, `archive_queue` — additive, same fail-loud spirit.
-- `score` for an RMS-decided event is the normalised RMS (already 0..1); the PSD detector's score is its tonal fraction. `detector_meta.decided_by` records `psd_tonal` | `rms` | `rms_fallback`.
-- Suppressed events carry their would-be `clip.path` with `uploaded: false`; the audio is not kept (D-008).
-- The device merges its own entry into `_sites.json` at startup (rare write; the read-modify-write is tolerable until the backend owns the registry).
-- `acoustic_indicators.json` and `ocean_conditions.json` have producers outside this repo. The device writes **conformant empty stubs at startup, only when the blob verifiably does not exist**, so the tree is valid and the tabs render empty instead of broken. The real producers overwrite them and must now write to the per-site paths.
-- If an event blob upload fails, the event is spooled locally (bounded at 500) and retried each heartbeat; spool overflow discards oldest and counts them in `health.events_dropped`. No event is lost silently.
-- `sites/{site}/remote_config.json` is read (not written) by the device, polled every 5 minutes. **Payload (Phase 2, 2026-08-13):**
-
-  ```jsonc
-  {
-    "version": "2026-08-13-01",          // any string/number; re-applied only when it changes
-    "config": {                           // all optional; unknown keys ignored
-      "score_min": 0.60,                  // clamp 0..1
-      "alert_min_rms": 0.010,             // clamp 0..1
-      "alert_threshold": 0.08,            // clamp 0..1 (rms mode)
-      "cooldown_s": 60,                   // clamp 10..3600
-      "heartbeat_s": 60,                  // clamp 30..3600
-      "psd_threshold_db": 8,              // clamp 1..30
-      "psd_f_min": 55, "psd_f_max": 1000, // clamp 10..2000 / 20..4000
-      "window_hop_s": 5.0                 // clamp 1..5. Step between analysis windows:
-                                          // 5.0 = back-to-back (calibrated behaviour);
-                                          // h<5 = overlapped windows — an event up to
-                                          // 5−h s always lands whole in some window.
-                                          // CPU cost ×(5/h); measure on bench first
-    },
-    "signature": "<hex>"                  // HMAC-SHA256 over canonical {"version","config"}
-  }
-  ```
-
-  Out-of-range values are clamped and logged (R-8.3); applied values appear in `status.json → detection.thresholds` (R-3.6 — this closes F-09's tuning half). If the device has `OCEANKIND_CONFIG_HMAC_KEY` set, an invalid or missing `signature` **rejects the whole payload loudly** (F-10); without the key it applies unsigned with a warning. The v1 flat keys (`alert_threshold`, `cooldown_seconds`, `heartbeat_interval`) are still accepted.
-
-- **Phase 2 health additions:** `health.capture_overflows` (PortAudio overflows + block-queue drops) joins the extra health fields. `status.json → audio.device` now describes the *selection rule* (`by-name:<hints>` or `synthetic:<pattern>`), not an ALSA index — indexes were the F-15 defect.
+- The `health` block carries fields beyond the schema below: `deaf_seconds_total`, `suppressed_count`, `events_dropped`, `wa_pending`, `archive_queue`, `capture_overflows` (PortAudio overflows plus block-queue drops). Additive, same fail-loud spirit. A consumer must tolerate more health fields than it knows.
+- `score` for an RMS-decided event is the normalised RMS, already 0..1. The PSD detector's score is its tonal fraction. `detector_meta.decided_by` records `psd_tonal` | `rms` | `rms_fallback`.
+- Suppressed events carry their would-be `clip.path` with `uploaded: false`. The audio is not kept (D-008).
+- `status.json → audio.device` describes the *selection rule*, `by-name:<hints>` or `synthetic:<pattern>`, never an ALSA index. Hardcoded indexes were the F-15 defect.
+- The device merges its own entry into `_sites.json` at startup. A rare read-modify-write, tolerable until the backend owns the registry.
+- If an event blob upload fails the event is spooled locally, bounded at 500, and retried each heartbeat. Spool overflow discards oldest and counts them in `health.events_dropped`. No event is lost silently.
+- Device configuration arrives as a signed blob. Full specification in **Device configuration** below, which is the only description of it in this document.
 
 ---
 
@@ -61,60 +40,13 @@ The schemas do not change. Who is obliged by them does. Three rules in particula
 - **Omitted power-history buckets** are read by the backend and forwarded as gaps. The backend must not backfill, interpolate or densify. Gaps are how outages are detected (dashboard R-8.6).
 - **An unknown `schema_version`** is now the backend's problem. It degrades visibly, serves what it understood, and reports the mismatch through the API so the browser can render it. It must not return an empty page and it must not 500.
 
-One consequence flows the other way: the device no longer reads its configuration from storage. See **Device configuration** below.
+Traffic runs the other way for exactly one blob: the device **reads** its configuration from storage, signed. See **Device configuration** below.
 
 ---
 
-## Superseded: v1 + Phase 1 additions (2026-08-12) — the frozen prototype shape
+## Why v2 is shaped this way
 
-**No device writes this anymore** (D-016, 2026-08-13). It is the final shape of the data sitting in the prototypes' old blob, kept because the dashboard reads that blob today and any tooling that touches the old history needs the reference. For one day (2026-08-12) a Phase 1 build emitted these additions on the v1 paths; it never reached the field.
-
-**Every blob now carries `schema_version: 1`.** The v2 layout will carry `2`. A consumer seeing an unknown version must warn visibly, not blank the page.
-
-**`status.json` additions** (all v1 fields unchanged):
-
-- `site` — the site prefix, or `null` for the legacy root layout
-- `health` — the fail-loud surface, published complete on every heartbeat:
-  `detector_ok` (bool, false after 3 consecutive classifier failures — F-02),
-  `audio_ok` (bool, from the RMS-floor window), `duty_cycle_pct` (measured, rolling
-  1 h window, `null` until data exists — F-05), `deaf_seconds_total` (cumulative,
-  session), `clips_dropped` (archive-queue overflow discards), `suppressed_count`
-  (session), `upload_backlog` (WhatsApp alerts awaiting retry), `archive_queue`
-  (clips awaiting Drive upload), `degraded_reason` (human-readable string or `null`)
-- `detection` — what actually runs and decides (F-09's honest-reporting half):
-  `mode` (`psd` | `rms` | `auto`), `detectors` (list), `thresholds`
-  (`score_min`, `rms_min`, `rms_threshold`, `psd_threshold_db`, `psd_f_min`,
-  `psd_f_max` — the values actually in force), `cooldown_s`, `last_rms`
-- `lat` / `lon` / `location_name` are now env-sourced and **`null` when unconfigured**
-  (F-08). The dashboard's own site table is the source of truth for location.
-
-**`manifest.json`**: top level gains `schema_version`. Entries gain:
-
-- `captured_utc` / `uploaded_utc` — split per R-4.3. **Semantic change:** the legacy
-  `timestamp` field now equals `captured_utc` (capture time); in v1 it was upload time.
-- `suppressed` (bool) — cooldown-suppressed detections are now **recorded, not erased**
-  (F-03, D-008). Suppressed entries have `audio_url: null`, `clip_uploaded: false`,
-  and no notification was sent. Historical counts before this change undercount.
-- `clip_uploaded` (bool) — truthful upload state (F-13/R-4.4). Upload now happens
-  **before** notification; `audio_url` may be `null` on a notified alert whose upload
-  failed.
-- `detector` (`psd_tonal` | `rms`) and `event_type` (`vessel` | `unknown`) — per
-  R-3.3/D-014, so the record can never again silently span two detector populations.
-- `decided_by` now reports what actually decided: `psd_tonal` | `rms` | `rms_fallback`
-  (was hardcoded `rms+ml` — F-01).
-
-**`power_history.json`**: gains `schema_version`. Otherwise unchanged.
-
-**Dashboard obligations created:** render `suppressed` entries distinctly (do not hide);
-tolerate `audio_url: null`; surface `health.detector_ok=false` and `degraded_reason`
-prominently; treat unknown `schema_version` as warn-not-break. These are the dashboard's
-Phase 1 items in the stack `PROGRESS.md`.
-
----
-
-## What v1 got wrong
-
-Four things worth fixing now, because none of them get cheaper later.
+Four defects in the prototype layout drove the design. They are recorded because they explain the schema, not because anything still emits them.
 
 **No version field.** A schema change is undetectable by either side. Every blob in v2 carries `schema_version`.
 
@@ -122,21 +54,23 @@ Four things worth fixing now, because none of them get cheaper later.
 
 **A rewritten manifest.** Every alert downloads the whole file, inserts, and re-uploads. That races against the retry path (F-14) and forces the dashboard to fetch the full history every 30 seconds (F-18). Per-event blobs remove both by construction rather than patching them.
 
-**Write-only and read-only fields.** The device writes fifteen fields nothing reads. The dashboard reads three fields nothing writes. Both directions are live defects today.
+**Write-only and read-only fields.** The prototype device wrote fifteen fields nothing read, and the dashboard read three fields nothing wrote. v2 carries only fields with a producer and a consumer, listed below.
 
 ---
 
-## Live mismatches found while writing this
+## Fields with no producer
+
+Defined in the schemas below, consumed by the dashboard, and **not produced by anything we build**. They are in the contract so the shape is settled; they arrive as `null` or as empty stubs until the client supplies a producer. Full list in `CLIENT-DEPENDENCIES.md`.
 
 | Field | Situation |
 |---|---|
-| `ram_total_mb`, `ram_used_mb` | Dashboard renders them. Device only produces `ram_used_pct`. Broken now |
-| `deg` | Dashboard draws detection bearings from it. **No code in the repository emits it** |
-| `ndsi_med`, `ndsi_q1`, `ndsi_q3`, `click_med`, `click_q1`, `click_q3` | Dashboard expects medians and quartiles. `a5_indicators.py` emits raw per-clip `ndsi` and `click_rate_hz`. **The aggregator between them does not exist in this repository** |
+| `bearing_deg` | The detections map draws it. Nothing emits it. Allow `null`, never invent a producer |
+| `acoustic_indicators.json` medians and quartiles | `raspberry-pi/tools/a5_indicators.py` emits raw per-clip `ndsi` and `click_rate_hz`. The aggregator between them exists in neither repository |
+| `ocean_conditions.json` | A marine forecast pull. No component in either repository produces it |
 
-Device fields written and never read: `status`, `alert_count_session`, `battery_voltage`, `battery_percent`, `solar_charging`, `modem_state`, `solar_error_code`, `solar_device`, `disk_path`, `lat`, `lon`, `location_name`, `bucket_s`.
+The device writes conformant empty stubs for the last two at startup, and only when the blob verifiably does not exist, so the tree validates and the tabs render empty instead of broken. The real producers overwrite them, and must write to the per-site paths.
 
-The coordinates dropping out of the read path is incidentally good: the dashboard now takes location from its own site table, so F-08 is half-mitigated on the consumer side while the device still publishes them.
+`ram_used_mb` and `ram_total_mb` were a v1 mismatch and are now produced. They are in `status.json` below.
 
 ---
 
@@ -251,7 +185,7 @@ One per detection. Written once, never modified.
 }
 ```
 
-Five deliberate changes from the v1 manifest entry.
+Five fields exist because the prototype layout got them wrong. The reasoning, not a compatibility note:
 
 `captured_utc` and `uploaded_utc` are separate. v1 conflated them, so every displayed timestamp was actually upload time, wrong by however long the cellular upload took.
 
@@ -385,30 +319,25 @@ Consumed by Condiciones del mar and Análisis. **Not produced by the device and 
 
 ## Device configuration
 
-**`remote_config.json` is retired.** It was a blob in the same container the device writes to, unsigned and unclamped, read every five minutes and applied on a version bump (F-10). Anyone holding the storage key could halve a threshold, or set the cooldown to a week, and the network would go quiet while every unit kept reporting itself healthy. It is not migrated to v2. It is removed.
-
-Configuration now comes from the backend, over HTTP, signed.
+One signed blob, written by the backend, read by the device. It is in this document rather than in `API-CONTRACT.md` because the transport is storage, like everything else here.
 
 ```
-GET /api/devices/config
-X-Device-Id:  Rpi_zapallar
-X-Device-Key: <per-device secret>
+sites/{site_id}/remote_config.json        written by the backend. read-only to the device
 ```
 
-The device credential is separate from any user session (dashboard R-6.1). A compromised browser session cannot reconfigure a device, and a stolen device key grants only this endpoint.
+The device polls it every `CONFIG_CHECK_INTERVAL` (300 s), on the transport path, never the capture path, with an explicit timeout (R-5.5). It applies a document only when `config_version` differs from the one in force.
 
-### Payload
+### Document
 
 ```jsonc
 {
   "schema_version":  2,
-  "device_id":       "Rpi_zapallar",
+  "config_version":  "2026-08-22-01",     // any string or number. re-applied only when it changes
   "site":            "zapallar",
-  "config_version":  7,                        // monotonic. the device applies only what is newer
-  "issued_utc":      "2026-08-12T14:00:00+00:00",
-  "expires_utc":     "2026-08-13T14:00:00+00:00",
+  "device_id":       "Rpi_zapallar",      // optional. null means the whole site
+  "issued_utc":      "2026-08-22T14:00:00+00:00",
 
-  "config": {
+  "config": {                              // all keys optional. missing keys keep their default
     "detection_mode":       "psd",
     "score_min":            0.60,
     "alert_min_rms":        0.010,
@@ -417,52 +346,83 @@ The device credential is separate from any user session (dashboard R-6.1). A com
     "psd_f_min":            55,
     "psd_f_max":            1000,
     "cooldown_s":           60,
-    "heartbeat_interval_s": 60
+    "heartbeat_interval_s": 60,
+    "window_hop_s":         5.0
   },
 
-  "signature": "9f2c..."                       // hex HMAC-SHA256
+  "signature": "9f2c…"                     // hex HMAC-SHA256
 }
 ```
 
+**An unknown key inside `config` is an error, not an omission.** A typo that silently tunes nothing is the quiet failure this system exists to remove. The whole document is rejected and the reason reaches `health.degraded_reason`.
+
 ### Signature
 
-HMAC-SHA256 over the payload with `signature` removed, serialised canonically: UTF-8, keys sorted, no whitespace (`json.dumps(payload, sort_keys=True, separators=(",", ":"))`). The key is `OCEANKIND_CONFIG_SIGNING_KEY`, held server-side and provisioned to the device in `/etc/oceankind.env`. It never appears in a blob, a log line or a response body.
+HMAC-SHA256 over **the entire document with `signature` removed**, serialised canonically: UTF-8, keys sorted, no whitespace.
 
-The device recomputes and compares with `hmac.compare_digest`. A payload that fails verification is discarded whole, never partially applied, logged, and named in `health.degraded_reason`. Rejecting a config is a health event, not a debug line.
+```python
+body = {k: v for k, v in document.items() if k != "signature"}
+canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
+signature = hmac.new(key.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+```
+
+The key is `OCEANKIND_CONFIG_HMAC_KEY`, shared between the backend and the device, provisioned to the device in `/etc/oceankind.env`. It is not the storage credential, which is the point: whoever can write the container still cannot forge a configuration (F-10).
+
+Verification is mandatory. The device compares with `hmac.compare_digest`, and a document that fails is discarded **whole**, never partially applied, logged, and named in `health.degraded_reason`. Rejecting a config is a health event, not a debug line. A device with no key configured refuses to apply any remote config at all, rather than accepting unsigned input.
 
 ### Clamping
 
-The client chooses thresholds; we bound them. A value outside its range is clamped to the nearest bound, applied, and reported in `detection.thresholds` at its clamped value, so `status.json` always shows what is actually in force (R-2.6). Clamping happens server-side, before signing, so the device and the operator see the same number.
+The client chooses thresholds. We bound them. Clamping happens in the backend, before signing, so the device and the operator see the same number. A clamped value is applied and reported, never silently accepted and never rejected: a tuning mistake must not strand a unit on stale config. `detection_mode` is the exception, rejected rather than clamped, because an enum typo would disable detection.
+
+Applied values appear in `status.json → detection.thresholds`, which closes F-09's tuning half (R-3.6).
 
 | Parameter | Type | Range | Default | Why bounded |
 |---|---|---|---|---|
-| `detection_mode` | enum | `psd` \| `rms` \| `auto` | `psd` | Anything else is a typo that disables detection |
-| `score_min` | float | 0.05 - 0.95 | 0.60 | 0 alerts on everything, 1.0 alerts on nothing. Both are silence |
-| `alert_min_rms` | float | 0.0 - 0.20 | 0.010 | Above 0.20 no real signal clears the gate |
-| `alert_threshold` | float | 0.005 - 0.50 | 0.08 | The `rms` mode's whole decision. 0 floods, 0.5 is deaf |
-| `psd_threshold_db` | float | 3 - 30 | 8 | Below 3 dB every peak looks tonal; above 30 none do |
-| `psd_f_min` | float | 20 - 2000 Hz | 55 | Must stay below `psd_f_max`. Inverted bounds are rejected, not clamped |
-| `psd_f_max` | float | 100 - 20000 Hz | 1000 | Capped at Nyquist after decimation |
-| `cooldown_s` | float | 10 - 3600 | 60 | Throttles notifications only. It never suppresses the record (F-03) |
-| `heartbeat_interval_s` | float | 30 - 3600 | 60 | Longer than an hour and liveness detection stops working |
+| `detection_mode` | enum | `psd` \| `rms` \| `auto` | `psd` | Rejected, not clamped. A typo here disables detection |
+| `score_min` | float | 0.05 – 0.95 | 0.60 | 0 alerts on everything, 1.0 on nothing. Both are silence |
+| `alert_min_rms` | float | 0.0 – 0.20 | 0.010 | Above 0.20 no real signal clears the gate |
+| `alert_threshold` | float | 0.005 – 0.50 | 0.08 | The `rms` mode's whole decision. 0 floods, 0.5 is deaf |
+| `psd_threshold_db` | float | 3 – 30 | 8 | Below 3 dB every peak looks tonal; above 30 none do |
+| `psd_f_min` | float | 20 – 2000 Hz | 55 | Must stay below `psd_f_max`. Inverted bounds are rejected |
+| `psd_f_max` | float | 100 – 20000 Hz | 1000 | Capped at Nyquist after decimation |
+| `cooldown_s` | float | 10 – 3600 | 60 | Throttles notifications only. Never suppresses the record (F-03) |
+| `heartbeat_interval_s` | float | 30 – 3600 | 60 | Longer than an hour and liveness detection stops working |
+| `window_hop_s` | float | 1.0 – 5.0 | 5.0 | Step between analysis windows. 5.0 is back-to-back, the calibrated behaviour. Below 5 the windows overlap so an event up to 5−h s always lands whole in one, at CPU cost ×(5/h). Measure on the bench before lowering |
 
-### Expiry and unreachability
+### If the blob is unreachable or unchanged
 
-`expires_utc` means *refresh me*, not *stop*.
+**The device keeps its last valid configuration.** It never falls back to defaults. A network outage silently reverting thresholds would change detection behaviour at precisely the moment nobody can observe it, which is the failure class this project exists to remove.
 
-**If the API is unreachable, the device keeps its last valid configuration.** It does not fall back to defaults. A network outage silently reverting thresholds would change detection behaviour at precisely the moment nobody can observe it, which is the failure class this project exists to remove.
+There is no expiry. A configuration stays in force until a document with a different `config_version` verifies. Stale and detecting beats fresh and silent.
 
-**If the configuration is past `expires_utc`, the device keeps using it** and sets `health.degraded_reason` to name the staleness after two consecutive missed refreshes. Stale-and-detecting beats fresh-and-silent.
+### Both implementations must converge on this
 
-The device polls on the interval `CONFIG_CHECK_INTERVAL` already uses. The poll runs on the transport path, never the capture path, and carries an explicit timeout (R-5.5).
+**CONVERGED both sides as of 2026-08-22.** Device convergence is verified by `raspberry-pi/tools/phase1_smoke_test.py` §8: an independently-signed document is accepted; tampered, wrong-key, unknown-key, bad-enum and inverted-band documents are rejected whole; a no-key device rejects everything; a document addressed to another `device_id` is skipped without being treated as an error.
+
+| | Device (`oceankind/config.py`) | Backend (`routers/devices.py`) | Contract |
+|---|---|---|---|
+| Transport | reads `sites/{site}/remote_config.json` | **writes the blob.** `GET /api/devices/config` is a read-only debug view returning it byte for byte | the blob |
+| Version key | `config_version` ✓ | `config_version` | `config_version` |
+| Signature covers | whole document minus `signature` ✓ | whole document minus `signature` | whole document minus `signature` |
+| Key name | `OCEANKIND_CONFIG_HMAC_KEY` | `OCEANKIND_CONFIG_HMAC_KEY` | `OCEANKIND_CONFIG_HMAC_KEY` |
+| No key configured | refuses to apply ✓ | refuses to publish, 503 | refuses to apply |
+| v1 flat key names | not accepted ✓ | not accepted | not accepted |
+| Unknown `config` key | rejects whole document, reason in `health.degraded_reason` ✓ | n/a (validated before signing) | rejects whole document |
+| Rejection surface | `health.degraded_reason` + ERROR log, deduped per `config_version` ✓ | 4xx to the operator | a health event, never a debug line |
+
+Device additions beyond the four convergence items, per the prose above: `detection_mode` is runtime-tunable (rejected on bad enum, never clamped), clamp ranges match this document's table exactly (including the Nyquist-after-decimation cap on `psd_f_max`, 6 kHz at the default decimation), inverted PSD bounds are evaluated against the *merged* result of document + in-force values, and a device with no key still runs on its env-file configuration — it simply accepts no remote changes.
+
+The remaining provisioning step: **generate the shared key and put it in both places** (backend secret store, device `/etc/oceankind.env`). Until then the backend refuses to publish and the device refuses to apply, which fails safe on both ends.
+
+The blob is normative because the device side is verified and shipping, and because it needs no device credential to exist first (D-017, D-018 are about a different problem). `GET /api/devices/config` may stay as a read-only debugging view, but it must return this exact document, and the backend must gain the writer that puts it in storage.
 
 ---
 
-## Migration
+## There is no migration
 
-**Cancelled by D-016 (2026-08-13).** There is no migration: the prototypes' blob is frozen on v1 with the dashboard reading it as-is, and the v2 fleet starts clean on new storage. The dual-write, backfill and deep-link-redirect plan below is retired.
+The prototype units' data stays where it is, in its own container, frozen. Nothing we build reads it. New units write v2 to the new container from their first heartbeat, and the dashboard reads that container and only that container.
 
-Two residual truths: WhatsApp `?play=` links sent by *new* units carry v2 clip paths and resolve only once the dashboard's v2 reader exists; and if anyone ever wants the prototype history alongside new data, that becomes a one-off offline import into `sites/{id}/events/` with `event_type: "unknown"`, `detector: "unknown"` — an analysis task, not a device concern.
+No dual-write, no backfill, no deep-link preservation across the boundary, no compatibility layer on either side. If the prototype history is ever wanted alongside new data, that is a one-off offline import into `sites/{id}/events/` carrying `event_type: "unknown"` and `detector: "unknown"`, because those were never recorded. It is an analysis task, and it is not part of either codebase.
 
 ---
 
@@ -482,6 +442,13 @@ Retention. Event blobs are append-only forever. At current volumes that is trivi
 
 ## Fixtures
 
-The generator writes a full tree in this shape into a development storage account: two sites, one at `sites/zapallar/` and one at `sites/matanzas/`, several weeks of events across both `event_type` values including suppressed ones, matching clips, status, power history, acoustic indicators and ocean conditions.
+`tools/generate_fixtures.py` in the dashboard repository writes a full tree in this shape, and it is the only shape either codebase is built against: two sites, one at `sites/zapallar/` and one at `sites/matanzas/`, several weeks of events across both `event_type` values including suppressed ones, matching clips, status, power history, acoustic indicators and ocean conditions.
 
-This is what unblocks both ends. The dashboard builds against fixtures with no device in existence. The device's testable job becomes "produce blobs that validate against this schema", which is assertable without any detection science, and which is the whole of what we are contracted to deliver.
+This is what unblocks both ends. The dashboard builds against fixtures with no device in existence. The device's testable job is "produce blobs that validate against this schema", assertable with no detection science, no hydrophone and no cloud account:
+
+```bash
+python3 tools/validate_contract.py ./out          # device side. exit 0 = conformant
+python3 raspberry-pi/tools/v2_conformance_test.py # drives the real emit code through it
+```
+
+Both sides are checked against the same document, which is the whole of what we are contracted to deliver.

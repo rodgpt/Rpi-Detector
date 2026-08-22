@@ -35,6 +35,16 @@ _detector_alert_sent   = False
 _rms_history: deque = deque()
 _audio_alert_sent = False
 
+# Config remota rechazada (firma, claves desconocidas, enum inválido…).
+# "Rejecting a config is a health event, not a debug line" — contrato.
+_config_error: str | None = None
+
+
+def set_config_error(reason: str | None) -> None:
+    global _config_error
+    with _lock:
+        _config_error = reason
+
 # Duty cycle: (monotonic, frames_entregados) en ventana móvil
 _frames_window: deque = deque()
 _capture_started_mono: float | None = None
@@ -129,8 +139,8 @@ def record_classify_result(ok: bool, reason: str = "") -> None:
 
 
 def detector_ok() -> bool:
-    if C.DETECTION_MODE == "rms":
-        return True
+    if C.CONFIG.snapshot()["detection_mode"] == "rms":
+        return True     # el modo rms no usa el clasificador
     return _classify_fail_consec < C.DETECTOR_FAIL_LIMIT
 
 
@@ -191,6 +201,8 @@ def build_health() -> dict:
     if not C.TWILIO_CONFIGURED:
         reasons.append("sin credenciales Twilio — ninguna alerta WhatsApp puede salir (modo banco)")
     with _lock:
+        if _config_error:
+            reasons.append(f"config remota rechazada: {_config_error}")
         clips_dropped  = _clips_dropped_total
         suppressed     = _suppressed_total
         events_dropped = _events_dropped_total

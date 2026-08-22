@@ -143,7 +143,9 @@ OCEANKIND_TWILIO_TO=
 # OCEANKIND_SCORE_MIN=0.60
 # OCEANKIND_ALERT_MIN_RMS=0.010
 # OCEANKIND_DETECTION_LABEL=MOTOR
-# OCEANKIND_CONFIG_HMAC_KEY=          # set to require signed remote config (F-10)
+# OCEANKIND_CONFIG_HMAC_KEY=          # REQUIRED for remote config: without it the
+                                      # device refuses all remote tuning (F-10).
+                                      # Same key lives in the backend secret store.
 ENV_EOF
     chmod 600 /etc/oceankind.env
     echo "Environment template written to /etc/oceankind.env — FILL IT IN before starting."

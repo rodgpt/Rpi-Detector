@@ -227,24 +227,36 @@ CONFIG_HMAC_KEY = os.environ.get("OCEANKIND_CONFIG_HMAC_KEY", "")
 
 # ── Parámetros afinables en caliente ─────────────────────────────────────────
 
-# Rangos de seguridad para la config remota (R-8.3). Fuera de rango se CLAMPEA
-# y se loguea; elegir el valor dentro del rango es ciencia y es del cliente.
+# Nyquist tras decimación: psd_f_max jamás puede superarlo (contrato: "capped
+# at Nyquist after decimation").
+_NYQUIST_HZ = SAMPLE_RATE / PSD_DECIMATION / 2.0
+
+# Rangos de seguridad (R-8.3), ALINEADOS con la tabla normativa de
+# docs/DATA-CONTRACT.md §Device configuration. El backend clampea antes de
+# firmar; el dispositivo re-clampea como defensa en profundidad (mismo rango,
+# así operador y unidad ven el mismo número). Elegir el valor dentro del rango
+# es ciencia y es del cliente.
 CLAMPS = {
-    "score_min":        (0.0, 1.0),
-    "alert_min_rms":    (0.0, 1.0),
-    "alert_threshold":  (0.0, 1.0),
-    "cooldown_s":       (10.0, 3600.0),
-    "heartbeat_s":      (30.0, 3600.0),
-    "psd_threshold_db": (1.0, 30.0),
-    "psd_f_min":        (10.0, 2000.0),
-    "psd_f_max":        (20.0, 4000.0),
-    "window_hop_s":     (1.0, 5.0),   # 1.0 = solape máximo (5× CPU). Medir en banco antes de bajar
+    "score_min":            (0.05, 0.95),
+    "alert_min_rms":        (0.0, 0.20),
+    "alert_threshold":      (0.005, 0.50),
+    "cooldown_s":           (10.0, 3600.0),
+    "heartbeat_interval_s": (30.0, 3600.0),
+    "psd_threshold_db":     (3.0, 30.0),
+    "psd_f_min":            (20.0, 2000.0),
+    "psd_f_max":            (100.0, min(20000.0, _NYQUIST_HZ)),
+    "window_hop_s":         (1.0, 5.0),   # 1.0 = solape máximo (5× CPU). Medir en banco antes de bajar
 }
 
-# Nombres v1 del remote_config.json → nombres actuales (compat de lectura)
-_LEGACY_KEYS = {"alert_threshold": "alert_threshold",
-                "cooldown_seconds": "cooldown_s",
-                "heartbeat_interval": "heartbeat_s"}
+# detection_mode viaja en el mismo objeto config pero NO se clampea: un typo en
+# un enum deshabilitaría la detección, así que se RECHAZA el documento entero.
+CONFIG_KEYS = set(CLAMPS) | {"detection_mode"}
+DETECTION_MODES = ("psd", "rms", "auto")
+
+
+class ConfigRejected(Exception):
+    """Documento de config remota rechazado ENTERO (jamás aplicado a medias).
+    Es un evento de salud: llega a health.degraded_reason, no solo al log."""
 
 
 class RuntimeConfig:
@@ -256,24 +268,29 @@ class RuntimeConfig:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self.score_min        = _INIT_SCORE_MIN
-        self.alert_min_rms    = _INIT_ALERT_MIN_RMS
-        self.alert_threshold  = _INIT_ALERT_THRESHOLD
-        self.cooldown_s       = _INIT_COOLDOWN
-        self.heartbeat_s      = _INIT_HEARTBEAT
-        self.psd_threshold_db = _INIT_PSD_THRESHOLD_DB
-        self.psd_f_min        = _INIT_PSD_F_MIN
-        self.psd_f_max        = _INIT_PSD_F_MAX
-        self.window_hop_s     = min(5.0, max(1.0, _INIT_WINDOW_HOP))
+        self.detection_mode       = DETECTION_MODE
+        self.score_min            = _INIT_SCORE_MIN
+        self.alert_min_rms        = _INIT_ALERT_MIN_RMS
+        self.alert_threshold      = _INIT_ALERT_THRESHOLD
+        self.cooldown_s           = _INIT_COOLDOWN
+        self.heartbeat_interval_s = _INIT_HEARTBEAT
+        self.psd_threshold_db     = _INIT_PSD_THRESHOLD_DB
+        self.psd_f_min            = _INIT_PSD_F_MIN
+        self.psd_f_max            = _INIT_PSD_F_MAX
+        self.window_hop_s         = min(5.0, max(1.0, _INIT_WINDOW_HOP))
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {k: getattr(self, k) for k in CLAMPS}
+            return {k: getattr(self, k) for k in CONFIG_KEYS}
 
     def apply(self, values: dict) -> list:
-        """Aplica valores clampeados. Devuelve descripciones de lo que cambió."""
+        """Aplica valores ya verificados (verify_remote_config), clampeando
+        numéricos. Devuelve descripciones de lo que cambió."""
         changes = []
         with self._lock:
+            if "detection_mode" in values and values["detection_mode"] != self.detection_mode:
+                changes.append(f"detection_mode: {self.detection_mode} → {values['detection_mode']}")
+                self.detection_mode = values["detection_mode"]
             for key, (lo, hi) in CLAMPS.items():
                 if key not in values:
                     continue
@@ -289,10 +306,6 @@ class RuntimeConfig:
                 if getattr(self, key) != val:
                     changes.append(f"{key}: {getattr(self, key)} → {val}")
                     setattr(self, key, val)
-            # coherencia interna de la banda PSD
-            if self.psd_f_max <= self.psd_f_min:
-                self.psd_f_max = self.psd_f_min + 10.0
-                changes.append(f"psd_f_max ajustado a {self.psd_f_max} (debe superar psd_f_min)")
         return changes
 
 
@@ -300,29 +313,61 @@ CONFIG = RuntimeConfig()
 
 
 def verify_remote_config(payload: dict) -> dict | None:
-    """Valida un remote_config.json v2 y devuelve los valores a aplicar, o None.
+    """Valida un documento de config remota contra el contrato (§Device
+    configuration de docs/DATA-CONTRACT.md). Convergido 2026-08-22 con el
+    backend, que ESCRIBE este blob.
 
-    Formato: {"version": <str|int>, "config": {...}, "signature": "<hex hmac>"}.
-    Compat v1: claves planas (alert_threshold, cooldown_seconds, heartbeat_interval).
-    Con OCEANKIND_CONFIG_HMAC_KEY definida, la firma es obligatoria:
-    HMAC-SHA256(key, json canónico de {"version":…, "config":{…}}).
+    Devuelve el objeto `config` a aplicar, o None si el documento va dirigido
+    a otra unidad (`device_id` distinto). Levanta ConfigRejected — evento de
+    salud — ante: clave HMAC no aprovisionada, firma inválida, objeto config
+    ausente, claves desconocidas, enum inválido o banda PSD invertida. Un
+    documento rechazado se descarta ENTERO; jamás se aplica a medias.
     """
+    # Sin clave, el dispositivo NO acepta config remota alguna. Aplicar sin
+    # firma "con warning" era el agujero F-10 reabierto.
+    if not CONFIG_HMAC_KEY:
+        raise ConfigRejected("OCEANKIND_CONFIG_HMAC_KEY no aprovisionada — "
+                             "el dispositivo rechaza toda config remota sin firma")
+
+    # Firma: HMAC-SHA256 sobre el DOCUMENTO ENTERO menos `signature`, JSON
+    # canónico (claves ordenadas, sin espacios). Idéntico byte a byte al
+    # canonicalizador del backend — dos lados hasheando objetos distintos es
+    # exactamente la falla que la tabla de convergencia documenta.
+    body = {k: v for k, v in payload.items() if k != "signature"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    expected = hmac.new(CONFIG_HMAC_KEY.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, str(payload.get("signature") or "")):
+        raise ConfigRejected(f"firma HMAC inválida (config_version {payload.get('config_version')!r})")
+
+    # Documento firmado y válido dirigido a otra unidad del sitio: no es error.
+    target = payload.get("device_id")
+    if target not in (None, "", DEVICE_ID):
+        log.info("config remota %r dirigida a %r — ignorada por %s",
+                 payload.get("config_version"), target, DEVICE_ID)
+        return None
+
     values = payload.get("config")
     if not isinstance(values, dict):
-        values = {new: payload[old] for old, new in _LEGACY_KEYS.items() if old in payload}
-    if CONFIG_HMAC_KEY:
-        canonical = json.dumps({"version": payload.get("version"),
-                                "config": payload.get("config", values)},
-                               sort_keys=True, separators=(",", ":"))
-        expected = hmac.new(CONFIG_HMAC_KEY.encode(), canonical.encode(),
-                            hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, str(payload.get("signature", ""))):
-            log.error("config remota RECHAZADA: firma HMAC inválida o ausente (versión %r)",
-                      payload.get("version"))
-            return None
-    else:
-        log.warning("config remota SIN verificación de firma (OCEANKIND_CONFIG_HMAC_KEY no definida) — "
-                    "los rangos se clampean igual")
+        raise ConfigRejected("documento sin objeto 'config'")
+
+    # Clave desconocida = error, no omisión: un typo que afina nada en
+    # silencio es la falla silenciosa que este sistema existe para eliminar.
+    unknown = sorted(set(values) - CONFIG_KEYS)
+    if unknown:
+        raise ConfigRejected(f"claves desconocidas en config: {unknown}")
+
+    if "detection_mode" in values and values["detection_mode"] not in DETECTION_MODES:
+        raise ConfigRejected(f"detection_mode inválido: {values['detection_mode']!r} "
+                             f"(un typo aquí deshabilita la detección)")
+
+    # Banda PSD invertida se rechaza (contrato), evaluada sobre el resultado
+    # de fusionar el documento con los valores vigentes.
+    current = CONFIG.snapshot()
+    f_min = float(values.get("psd_f_min", current["psd_f_min"]))
+    f_max = float(values.get("psd_f_max", current["psd_f_max"]))
+    if f_min >= f_max:
+        raise ConfigRejected(f"banda PSD invertida: psd_f_min={f_min} >= psd_f_max={f_max}")
+
     return values
 
 

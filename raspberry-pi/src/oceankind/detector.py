@@ -112,8 +112,9 @@ def decide(rms: float, ml_result: dict, cfg: dict) -> dict:
     Devuelve alert, decided_by, detector, event_type, label y score (0..1;
     para RMS es el RMS normalizado — no hay confianza que inventar).
     """
+    mode = cfg["detection_mode"]
     score = ml_result.get("proba", 0.0) if ml_result else 0.0
-    if C.DETECTION_MODE == "psd" or (C.DETECTION_MODE == "auto" and ml_result):
+    if mode == "psd" or (mode == "auto" and ml_result):
         return {
             "alert":      rms >= cfg["alert_min_rms"] and score >= cfg["score_min"],
             "decided_by": "psd_tonal",
@@ -124,7 +125,7 @@ def decide(rms: float, ml_result: dict, cfg: dict) -> dict:
         }
     return {
         "alert":      rms >= cfg["alert_threshold"],
-        "decided_by": "rms" if C.DETECTION_MODE == "rms" else "rms_fallback",
+        "decided_by": "rms" if mode == "rms" else "rms_fallback",
         "detector":   "rms",
         "event_type": "unknown",        # el RMS no distingue tipo de evento
         "label":      "RUIDO FUERTE",

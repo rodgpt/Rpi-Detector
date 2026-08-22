@@ -39,7 +39,7 @@ def build_status(session_start: datetime, alert_count: int, last_rms: float,
     now = datetime.now(timezone.utc)
     cfg = C.CONFIG.snapshot()
     detectors = {"psd": ["psd_tonal"], "rms": ["rms"],
-                 "auto": ["psd_tonal", "rms"]}.get(C.DETECTION_MODE, [])
+                 "auto": ["psd_tonal", "rms"]}.get(cfg["detection_mode"], [])
     return {
         "schema_version":   C.SCHEMA_VERSION,
         "site":             C.SITE,
@@ -52,7 +52,7 @@ def build_status(session_start: datetime, alert_count: int, last_rms: float,
         "system_uptime_s":  stats.get("system_uptime_s"),
         "health":           health.build_health(),
         "detection": {
-            "mode":       C.DETECTION_MODE,
+            "mode":       cfg["detection_mode"],
             "detectors":  detectors,
             "thresholds": {
                 "score_min":        cfg["score_min"],
@@ -124,10 +124,10 @@ def upload_status(session_start: datetime, alert_count: int, last_rms: float) ->
 def main() -> None:
     C.validate_startup_config()
 
+    cfg = C.CONFIG.snapshot()
     log.info("=== OceanKind %s — %s (sitio %s) ===", __version__, C.DEVICE_ID, C.SITE or "—")
     log.info("Modelo continuo: captura → clasificador → transporte. Modo %s | fuente %s",
-             C.DETECTION_MODE.upper(), C.AUDIO_SOURCE)
-    cfg = C.CONFIG.snapshot()
+             cfg["detection_mode"].upper(), C.AUDIO_SOURCE)
     log.info("Umbrales: score_min=%.2f rms_min=%.3f rms_thr=%.3f | PSD %g dB, %g-%g Hz | cooldown %.0fs",
              cfg["score_min"], cfg["alert_min_rms"], cfg["alert_threshold"],
              cfg["psd_threshold_db"], cfg["psd_f_min"], cfg["psd_f_max"], cfg["cooldown_s"])
@@ -159,11 +159,12 @@ def main() -> None:
     session_start = datetime.now(timezone.utc)
     last_status = last_power = last_config = last_wa_hb = 0.0
     applied_config_version = None
+    rejected_config_version = None
 
     try:
         while not stop.is_set():
             now = time.time()
-            hb = C.CONFIG.snapshot()["heartbeat_s"]
+            hb = C.CONFIG.snapshot()["heartbeat_interval_s"]
 
             if now - last_status >= hb:
                 health.maybe_alert_audio_health()   # R-2.2: hidrófono muerto suena
@@ -201,17 +202,27 @@ def main() -> None:
 
             if C.STORAGE_ENABLED and now - last_config >= C.CONFIG_CHECK_INTERVAL:
                 payload = storage.download_json(storage.site_path("remote_config.json"))
-                if payload and payload.get("version") != applied_config_version:
-                    values = C.verify_remote_config(payload)
-                    if values is not None:
-                        changes = C.CONFIG.apply(values)
-                        applied_config_version = payload.get("version")
-                        if changes:
-                            log.info("⚙️  Config remota v%s aplicada: %s",
-                                     applied_config_version, "; ".join(changes))
-                        else:
-                            log.info("⚙️  Config remota v%s sin cambios efectivos",
-                                     applied_config_version)
+                # Blob inalcanzable o config_version sin cambios: se mantiene la
+                # última config válida. Jamás se cae a defaults (contrato:
+                # "stale and detecting beats fresh and silent").
+                if payload and payload.get("config_version") != applied_config_version:
+                    try:
+                        values = C.verify_remote_config(payload)
+                    except C.ConfigRejected as exc:
+                        # Rechazo = evento de salud, no línea de debug.
+                        health.set_config_error(str(exc))
+                        if payload.get("config_version") != rejected_config_version:
+                            log.error("⚙️  Config remota RECHAZADA entera: %s", exc)
+                            rejected_config_version = payload.get("config_version")
+                    else:
+                        if values is not None:   # None = dirigida a otra unidad
+                            changes = C.CONFIG.apply(values)
+                            health.set_config_error(None)
+                            applied_config_version = payload.get("config_version")
+                            rejected_config_version = None
+                            log.info("⚙️  Config remota %r aplicada: %s",
+                                     applied_config_version,
+                                     "; ".join(changes) if changes else "sin cambios efectivos")
                 last_config = now
 
             stop.wait(timeout=1.0)

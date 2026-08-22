@@ -76,7 +76,7 @@ Verified by `tools/pipeline_soak_test.py`: real threaded pipeline, synthetic sou
 - [x] Classifier worker thread — every 5 s window classified, gapless
 - [x] Transport worker with generalised retry covering uploads, not just WhatsApp (R-5.3) — event spool + heartbeat drain; shutdown preserves undelivered jobs
 - [x] Telemetry on its own timer (R-6.1) — housekeeping thread; folded with the config poller (deliberate deviation, see ARCHITECTURE)
-- [x] Remote config with HMAC verification, clamped ranges, version gating (R-8.3, F-09, F-10) — via `sites/{site}/remote_config.json` for now (there is no backend yet); payload + clamps in `docs/DATA-CONTRACT.md`. Moves to the backend endpoint when D-003 produces one
+- [x] Remote config with HMAC verification, clamped ranges, version gating (R-8.3, F-09, F-10) — **converged with the backend 2026-08-22** per `docs/DATA-CONTRACT.md` §Device configuration: `config_version`, signature over the whole document, no key = no remote config, unknown keys reject whole, `detection_mode` runtime-tunable. Verified by smoke test §8. Pending: provision the shared HMAC key on both ends
 - [x] Explicit timeouts on every network call (R-5.5) — Twilio `TwilioHttpClient(timeout=15)` (verified against the installed SDK), Azure connection/read timeouts, modem 3 s, serial 1 s
 - [x] Telemetry off `/boot/firmware` (R-6.2, F-16) — CSV in `STATE_DIR` (tmpfs), trimmed, nothing writes to the boot partition
 - [x] Battery dedup state out of hardcoded `/tmp` (R-6.4, F-19) — in `STATE_DIR`; survives service restarts. Reboot persistence needs the D-002 partition (one env var when it lands)

@@ -84,7 +84,7 @@ class Pipeline:
     def _classify_loop(self) -> None:
         assembler = capture.ClipAssembler(self.block_queue)
         log.info("Clasificador listo: ventanas de %.0f s, modo %s",
-                 C.CAPTURE_SECONDS, C.DETECTION_MODE.upper())
+                 C.CAPTURE_SECONDS, C.CONFIG.snapshot()["detection_mode"].upper())
         while not self.stop_event.is_set():
             clip = assembler.next_clip(timeout=1.0)
             if clip is None:
@@ -103,7 +103,7 @@ class Pipeline:
         health.record_rms(rms)
 
         ml_result = {}
-        if C.DETECTION_MODE in ("psd", "auto"):
+        if cfg["detection_mode"] in ("psd", "auto"):
             ml_result = detector.classify_samples(C.SAMPLE_RATE, clip, cfg)
         d = detector.decide(rms, ml_result, cfg)
 

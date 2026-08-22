@@ -7,6 +7,8 @@ Exercises the pure-function surface of the oceankind package:
   4. health block always publishes every counter
   5. non-finite float sanitisation (R-4.6)
   6. decide(): every mode can genuinely fire (F-01)
+  7. overlapping analysis windows (window_hop_s)
+  8. signed remote config, contract-converged (F-10): accept/reject matrix
 """
 import os
 import sys
@@ -142,7 +144,59 @@ clamped = C.CONFIG.apply({"window_hop_s": 0.1})   # bajo el mínimo → clamp a 
 check("hop clampeado a >=1.0", C.CONFIG.snapshot()["window_hop_s"] == 1.0, f"({clamped})")
 C.CONFIG.apply({"window_hop_s": 5.0})
 
-print("8. startup validation")
+print("8. remote config: contract-converged verification (F-10)")
+import hashlib as _hl
+import hmac as _hm
+import json as _json
+
+
+def _signed_doc(key, cfg, version="2026-08-22-01", device_id=None, tamper=False):
+    doc = {"schema_version": 2, "config_version": version, "site": "banco",
+           "device_id": device_id, "issued_utc": "2026-08-22T14:00:00+00:00",
+           "config": cfg}
+    body = _json.dumps(doc, sort_keys=True, separators=(",", ":"))
+    doc["signature"] = _hm.new(key.encode(), body.encode(), _hl.sha256).hexdigest()
+    if tamper:
+        doc["config"] = {**cfg, "score_min": 0.05}
+    return doc
+
+
+try:
+    C.verify_remote_config(_signed_doc("k", {"score_min": 0.7}))
+    check("no key -> whole doc rejected", False)
+except C.ConfigRejected as e:
+    check("no key -> whole doc rejected", "HMAC_KEY" in str(e))
+
+C.CONFIG_HMAC_KEY = "test-key-123"
+try:
+    vals = C.verify_remote_config(_signed_doc("test-key-123", {"score_min": 0.7, "window_hop_s": 2.5}))
+    check("valid signature over whole doc accepted", vals == {"score_min": 0.7, "window_hop_s": 2.5})
+except C.ConfigRejected as e:
+    check("valid signature over whole doc accepted", False, f"({e})")
+
+for name, doc in (
+    ("tampered doc rejected", _signed_doc("test-key-123", {"score_min": 0.7}, tamper=True)),
+    ("wrong key rejected", _signed_doc("other-key", {"score_min": 0.7})),
+    ("unknown config key rejects WHOLE doc", _signed_doc("test-key-123", {"score_mim": 0.7})),
+    ("bad detection_mode rejected", _signed_doc("test-key-123", {"detection_mode": "ml"})),
+    ("inverted PSD band rejected", _signed_doc("test-key-123", {"psd_f_min": 1500, "psd_f_max": 300})),
+):
+    try:
+        C.verify_remote_config(doc)
+        check(name, False)
+    except C.ConfigRejected:
+        check(name, True)
+
+other = C.verify_remote_config(_signed_doc("test-key-123", {"score_min": 0.9}, device_id="Rpi_otra"))
+check("doc for another device_id skipped, not rejected", other is None)
+changes = C.CONFIG.apply({"detection_mode": "auto", "score_min": 0.99})
+check("apply: mode switches, out-of-range clamped to 0.95",
+      C.CONFIG.snapshot()["detection_mode"] == "auto"
+      and C.CONFIG.snapshot()["score_min"] == 0.95, f"({changes})")
+C.CONFIG.apply({"detection_mode": "psd", "score_min": 0.6})
+C.CONFIG_HMAC_KEY = ""
+
+print("9. startup validation")
 check("bench escape hatch allows start", C.TWILIO_CONFIGURED is False and C.ALLOW_NO_TWILIO is True)
 try:
     C.validate_startup_config()

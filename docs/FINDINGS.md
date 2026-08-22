@@ -27,7 +27,7 @@ Paths are post-restructure. Last verified: 2 August 2026.
 | F-07 | HIGH | Blob container is public and unauthenticated | Reports, confirmed | 1 |
 | F-08 | HIGH | GPS coordinates hardcoded and published — **FIXED; fully closed 2026-08-13** (coords only in `_sites.json`) | Reports, confirmed | 1 |
 | F-09 | HIGH | Remote config cannot change detection sensitivity — **FIXED 2026-08-13** (real params tunable, clamped, published) | New | 1 |
-| F-10 | HIGH | Remote config is unsigned and unclamped — **FIXED 2026-08-13** (clamps always; HMAC enforced once key provisioned) | Reports, confirmed | 1 |
+| F-10 | HIGH | Remote config is unsigned and unclamped — **FIXED; signature mandatory 2026-08-22** (no key = no remote config at all) | Reports, confirmed | 1 |
 | F-11 | HIGH | Provisioning installs the abandoned prototype — **FIXED 2026-08-12** | Reports, confirmed | 1 |
 | F-12 | HIGH | Dashboard has no authentication | Reports, confirmed | 2 |
 | F-13 | MEDIUM | WhatsApp alert is sent before the clip exists — **FIXED 2026-08-12** | Reports, confirmed | 1 |
@@ -410,7 +410,7 @@ The monolith became the `oceankind/` package: capture / classify / transport thr
 
 **F-09 — fully fixed.** The parameters that actually decide (`score_min`, `alert_min_rms`, `alert_threshold`, PSD band, cooldown) are settable through `sites/{site}/remote_config.json` without restart, clamped to safe ranges, version-gated, and the applied values are published in `detection.thresholds`. Payload spec in `docs/DATA-CONTRACT.md`.
 
-**F-10 — fixed, one provisioning step pending.** All remote values are clamped unconditionally. HMAC-SHA256 signature verification is implemented and enforced whenever `OCEANKIND_CONFIG_HMAC_KEY` is set; until the key is provisioned on both ends, unsigned payloads apply with a loud warning. (The config source moves from blob to backend endpoint when D-003 produces one.)
+**F-10 — fixed; signature mandatory since 2026-08-22.** Converged with the backend on the contract's §Device configuration: HMAC-SHA256 over the whole document minus `signature`, `config_version` as the version key, no v1 flat names. A device with **no key configured refuses all remote config** (it keeps running on its env-file values) — the earlier apply-unsigned-with-warning behaviour was the F-10 hole reopening and is gone. Unknown config keys, bad `detection_mode` enums and inverted PSD bands reject the document whole, and every rejection is a health event: named in `health.degraded_reason`, ERROR-logged once per `config_version`. Verified by smoke test §8 against independently-signed documents. Remaining: provision the shared key on both ends (fails safe until then — backend won't publish, device won't apply).
 
 **F-15 — fixed.** Device selected by name substrings (`OCEANKIND_AUDIO_DEVICE_NAME`), never by ALSA index. Ported from the legacy prototype per D-006.
 

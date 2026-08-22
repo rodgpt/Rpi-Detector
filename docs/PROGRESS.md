@@ -73,7 +73,7 @@ The hydrophone stops going deaf: capture streams continuously on its own thread;
 - [x] Upload before notify (F-13, carried over from Phase 1)
 - [x] Telemetry moved off the read-only boot partition (F-16, F-19 — reboot persistence waits on D-002)
 - [x] Monolith split into modules (`oceankind/` package)
-- [x] Remote config: clamped, HMAC-verified when key set, real parameters tunable (F-09, F-10)
+- [x] Remote config: **converged with the backend 2026-08-22** (DATA-CONTRACT §Device configuration) — `config_version`, signature over whole document, no key = no remote config, unknown keys reject whole, `detection_mode` runtime-tunable (F-09, F-10). Pending: provision the shared HMAC key on both ends
 - [ ] Soak test on the bench Zero 2W, memory measured — **needs bench**
 - [ ] Duty cycle ≥99 % over 24 h on bench — **needs bench**
 
