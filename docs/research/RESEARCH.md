@@ -2,7 +2,7 @@
 
 Technical research for the whole stack. Adapted from the Lynch Protocol three-stage pipeline.
 
-Kept at the umbrella level rather than per codebase, because the choices that need researching here mostly cross both: an Azure service decision affects the device, the dashboard and the future backend at once.
+Kept at the umbrella level rather than per codebase, because the choices that need researching here mostly cross both: an Azure service decision affects the device, the dashboard and the backend at once.
 
 ---
 
@@ -43,7 +43,7 @@ Both copied unmodified from the protocol. Do not edit them here.
 
 | File | Topic | Status |
 |---|---|---|
-| — | none yet | — |
+| [azure-storage-deployment.md](./azure-storage-deployment.md) | Storage account, private container, credential model for the v2 fleet | Written 2026-08-25. Analysis stage is D-017 in `../../DECISIONS.md`. Steps 1–6 verified against Microsoft docs; not yet executed |
 
 ---
 
@@ -51,9 +51,9 @@ Both copied unmodified from the protocol. Do not edit them here.
 
 Written up here so the queue survives a context reset. Each maps to an open decision.
 
-**Backend platform** (D-003). Azure Functions, Static Web Apps with a managed API, Container Apps, or something outside Azure. Static Web Apps is worth real attention because the dashboard is already static-hosted on Azure and the product bundles hosting, an API surface and managed authentication, which would close F-07 and F-12 together. Verify current capabilities and pricing from Microsoft's documentation. Blocks all of Phase 5.
+**Backend platform** (D-003) — SETTLED without a research doc: Dashboard D-019 built FastAPI + Postgres + React in three containers. Kept in the queue only as the record that it was resolved by building, not by analysis.
 
-**Backend datastore** (D-004). Table Storage, Cosmos DB, Azure SQL, or SQLite on an Azure Files share. Cosmos is over-specified at tens of units and `IMPROVEMENT_REPORT.md` §3.5.2 already concedes SQLite would do. Decide after the platform.
+**Backend datastore** (D-004) — SETTLED and later REOPENED on its own terms: Postgres for application data (Dashboard D-019), plus a derived index of detection events (Dashboard D-021). The volume assumption that drove "likely no datastore" was wrong by three orders of magnitude; see D-004's entry.
 
 **Capture mechanism** (D-006). `sounddevice` with a callback queue, as `legacy/modular-prototype/audio_capture.py` already implements, versus a long-running `arecord` pipe. Needs a memory measurement on the 512 MB bench unit before committing, since librosa and scikit-learn are already resident.
 
@@ -73,4 +73,4 @@ Written up here so the queue survives a context reset. Each maps to an open deci
 - [DATA-CONTRACT.md](../DATA-CONTRACT.md) — the seam between the codebases
 - [PROGRESS.md](../PROGRESS.md) — stack-level state
 
-**Last updated:** 2026-08-02
+**Last updated:** 2026-08-25

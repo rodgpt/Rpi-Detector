@@ -13,7 +13,7 @@ Based on the Lynch Protocol `lyncHwareProtocol` variant, adapted. No server infr
 Then, in order:
 
 1. **`README.md`** — Layout, what the system does, the traps that will surprise you
-2. **`../docs/FINDINGS.md`** — Twenty verified defects. Four can silently stop detection
+2. **`../docs/FINDINGS.md`** — 23 verified defects, most now fixed. Four can silently stop detection
 3. **`docs/ARCHITECTURE.md`** — Process model, threading, state machine, power, filesystem. **Read before any design decision.**
 4. **`../docs/DATA-CONTRACT.md`** — Everything this device writes is consumed by the dashboard
 5. **`../DECISIONS.md`** — What is settled, what is open, what is blocked

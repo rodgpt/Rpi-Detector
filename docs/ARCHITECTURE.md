@@ -1,164 +1,61 @@
-# System architecture — whole stack
+# System architecture — as built
 
-**Version:** v1.1.0 as deployed
-**Last updated:** 2026-08-02
-
-How the pieces fit. Device-internal design (threading, state machine, power, filesystem) is in `raspberry-pi/docs/ARCHITECTURE.md`. This file covers the system.
+**Last updated: 2026-08-25.** Describes what exists and runs today. The previous revision of this file (10 Aug) described the pre-engagement system — no backend, public container, static-hosted single file — and none of that is true anymore. Device internals: `raspberry-pi/docs/ARCHITECTURE.md`. Decisions cited: device register unless qualified.
 
 ---
 
-## Philosophy
-
-Three principles the existing system already follows, mostly by instinct rather than by decision. Worth stating because Phase 1 and Phase 2 have to preserve them.
-
-**The two halves are decoupled and stay that way.** The Pi has no HTTP server. The dashboard has no backend. Neither knows the other's address. Blob storage is the entire interface. This means either side can be down, updated or replaced without the other noticing, which on a cellular-connected solar node is worth a great deal. It is also why the container is public, which is the root of most security findings. The fix is to authenticate the seam, not to collapse it.
-
-**The physical world fails constantly and silently.** Cellular drops. The Victron cable is unplugged. USB re-enumerates and the audio device index changes. The modem stops answering. The existing code degrades gracefully almost everywhere, which is correct. What it does not do is *say* it has degraded, which is the central defect class.
-
-**Silence is the worst failure.** The system exists to notice a sound lasting a fraction of a second. A crash gets noticed. A unit reporting "online" every twelve hours while detecting nothing does not. Four catalogued defects have this shape.
-
----
-
-## Layers
+## The three parts
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  PHYSICAL                                                     │
-│  2x Aquarian H5 hydrophones · audio HAT (D-009: which?)       │
-│  40-100W solar · 12V LiFePO4 · Victron MPPT · ZTE 4G modem    │
-└──────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────┐
-│  EDGE — raspberry-pi/                                         │
-│  Raspberry Pi 4B, Raspberry Pi OS, overlay filesystem         │
-│  capture → features (librosa) → classify (sklearn, 53 params) │
-│  telemetry: VE.Direct serial, modem HTTP, /proc, /sys         │
-│  Single thread today. Phase 2 makes it four.                  │
-└──────────────────────────────────────────────────────────────┘
-              ↓ HTTPS                    ↓ HTTPS
-┌───────────────────────────┐  ┌──────────────────────────────┐
-│  AZURE BLOB STORAGE       │  │  TWILIO → WhatsApp           │
-│  marfuturatest / alerts   │  │  detection, heartbeat,       │
-│  PUBLIC READ (F-07)       │  │  battery templates           │
-│  THE CONTRACT             │  │  deep link back to dashboard │
-└───────────────────────────┘  └──────────────────────────────┘
-              ↓ HTTPS, 30s poll, no auth
-┌──────────────────────────────────────────────────────────────┐
-│  CLIENT — dashboard/                                          │
-│  One static HTML file on Azure Static Web Hosting             │
-│  Chart.js · Leaflet · client-side FFT spectrogram             │
-└──────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────┐
-│  AZURE IOT HUB                                                │
-│  The Pi connects and sends alerts and heartbeats.             │
-│  NOTHING CONSUMES THEM. Dead limb, kept for Phase 5.          │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────┐   writes v2 blobs    ┌──────────────────────┐
+│ DEVICE               │ ───────────────────► │ AZURE BLOB STORAGE   │
+│ Raspberry Pi, solar, │                      │ private container    │
+│ 4G. oceankind/ pkg,  │ ◄─────────────────── │ sites/{site}/…       │
+│ 4 threads + main     │   polls signed       │ one blob per event   │
+└─────────────────────┘   remote_config.json  └──────────┬───────────┘
+                                                          │ reads (only reader)
+                                                          ▼
+┌─────────────────────┐    HTTPS + session    ┌──────────────────────┐
+│ BROWSER              │ ◄──────────────────► │ BACKEND + FRONTEND   │
+│ React SPA, served by │                      │ FastAPI · Postgres   │
+│ nginx container      │                      │ 3 containers (D-019) │
+└─────────────────────┘                      └──────────────────────┘
 ```
 
-The IoT Hub connection deserves emphasis because it misleads readers. `docs/legacy` describes a full Microsoft Project 15 pipeline: routing, Stream Analytics, Cosmos, Power BI. None of it exists. The Pi holds a client and sends messages into a hub nobody reads. It is not load-bearing and it is not free: it is one more network call inside the deaf window.
+**Device** (`raspberry-pi/src/oceankind/`, ~2,400 lines, ten modules): capture thread with bounded queues, classifier worker, transport worker, telemetry, housekeeping main thread. Emits the v2 contract only (D-016): `sites/{site}/events/YYYY/MM/DD/`, append-only, one blob per detection, suppressed events recorded. Fail-loud health surface in `status.json`. Verified by `raspberry-pi/tools/v2_conformance_test.py` driving the real emit code through `tools/validate_contract.py`.
+
+**Storage** is the seam and the only coupling. The device writes without the backend existing — that property is deliberate and load-bearing (an unattended solar node must not depend on our uptime to record a detection). Storage is also the archive: clips at terabyte scale over years belong here, not in a database. Schemas: `docs/DATA-CONTRACT.md`, canonical here, mirrored to the dashboard, enforced by validator and `make contract`.
+
+**Backend and frontend** (`Dashboard-Detector`): FastAPI owning users (argon2, throttled login), roles, per-site access enforced per request, per-device API credentials, all secrets, and every storage read. Postgres holds users/roles/sites/device records — and, per Dashboard D-021, a derived index of detection events (the blob store is the record, never the query engine). React + Vite frontend served by nginx; the browser never holds a storage credential; clips are proxied.
+
+**Configuration flows the other way**, backend → storage → device: the backend clamps, signs (HMAC-SHA256, `OCEANKIND_CONFIG_HMAC_KEY`) and writes `sites/{site}/remote_config.json`; the device polls, verifies, and rejects whole on any failure (D-020, F-10 closed). Convergence of both implementations verified by independent recompute on 2026-08-22.
 
 ---
 
-## The seam
+## Security, current state
 
-Everything that crosses between the two codebases is specified in `DATA-CONTRACT.md`. Read it before changing anything on either side.
+Built: authentication for every data route, per-device API keys (hashed, shown once, revocable), signed device config with mandatory verification, refuse-to-start on missing secrets, private container on the new storage account, coordinates out of source (`_sites.json`).
 
-The property that matters architecturally: **the contract is unenforced.** No schema, no version field, no validation, no test. Coupling this tight with verification this weak is the main structural risk in the system, ahead of any individual defect. Phase 1 adds a `schema_version` field, which is the cheapest thing that makes the Phase 4 layout migration survivable.
+Remaining: device still authenticates to storage with a connection string — write-scoped per-device credential is device D-017 (decided 2026-08-25, not yet built). Twilio token rotation blocked on client console access (F-04, code side fixed). Watchdog for hangs is Phase 5 (R-2.7).
 
----
-
-## Control flow today
-
-One thread, strictly sequential. This is the architecture Phase 2 replaces.
-
-```
-loop:
-  every 300s   download remote_config.json, apply           (network, unbounded)
-  always       arecord -d 5                                  BLOCKING 5s  ← only listening happens here
-  always       librosa load + 52 features + predict          1-3s
-  if alert     Twilio send (no timeout)                      seconds to unbounded
-               upload clip (960 KB over cellular)            2-20s
-               download + rewrite manifest (grows to MB)     seconds
-               IoT Hub send                                  seconds
-  every 60s    modem HTTP (3s timeout)                       up to 3s
-               VE.Direct serial read                         up to 3s
-               upload status.json                            1-2s
-               append CSV                                    fails silently (F-16)
-  every 600s   rebuild + upload power_history.json           seconds
-  every 12h    WhatsApp heartbeat                            seconds
-```
-
-Everything below the `arecord` line is deaf time. On a quiet cycle that is roughly 20 to 40 percent. On an alert cycle it is plausibly 30 to 60 seconds, immediately after a detection, which is exactly when a blast sequence continues. See F-05.
-
-The two delivered audits disagree about how much this costs in missed events. Neither measured it. Phase 1 instruments the loop so the argument is replaced by a number before Phase 2 changes anything.
+**The prototypes at Zapallar and Matanzas are frozen** (D-016): still v1, still the old public blob, unreachable, nothing deploys to them from either repo. Their exposure is inherited, documented, and closed only by decommissioning.
 
 ---
 
-## Control flow after Phase 2
+## Failure modes
 
-Four threads, one invariant: **capture never blocks on anything.**
-
-```
-capture thread        continuous, ring buffer, device detected by name
-     ↓ bounded queue, explicit drop policy, drop counter published
-classify thread       features + inference, CPU only
-     ↓ bounded queue
-transport thread      upload → then notify → then manifest. retries internally
-telemetry thread      own timer. serial, modem, system stats
-config thread         poll, validate, clamp, apply under lock
-```
-
-The bounded queues are not incidental. On slower hardware, an unbounded queue converts the deaf-window problem into a silent backlog, which is the same failure in different clothing. A dropped clip that is counted and published is honest. A queue quietly growing is not.
-
-Detail in `raspberry-pi/docs/ARCHITECTURE.md`.
+| Failure | Behaviour today |
+|---|---|
+| Backend down | Device unaffected; keeps recording to storage. Dashboard shows failed fetches visibly (R-7.1) |
+| Storage unreachable from device | Events spool locally, bounded at 500, drain on return; overflow counted in `health.events_dropped` |
+| Clip upload fails | Event recorded anyway, `clip.uploaded: false`, upload before notify (F-13) |
+| Config blob tampered/unsigned | Rejected whole, named in `health.degraded_reason`; last valid config stays in force |
+| Detector fails to load | `health.detector_ok: false` + alert (F-02). Silence is never healthy |
+| One data source malformed | That panel degrades; the rest of the dashboard stands (R-7.3) |
+| Index drifts from storage | Dashboard R-12.5: measured per day/site, surfaced as a fault, rebuildable by replay |
 
 ---
 
-## Failure modes and what happens
+## What this file is not
 
-| Failure | Today | After Phase 1 and 2 |
-|---|---|---|
-| Model fails to load | Detects nothing forever, reports online (F-02) | Alarm out, `detector_healthy: false`, RMS fallback |
-| `DETECTION_MODE` set to `rms` | Detects nothing forever, silently (F-01) | Works as documented |
-| Cellular down | Alerts buffered, capture blocked during timeouts | Buffered, capture unaffected |
-| Upload fails after alert sent | Dead link, manifest never updated (F-13) | Upload first, then notify |
-| Two detections inside cooldown | Second erased, clip leaks into RAM (F-03) | Recorded as suppressed, clip deleted |
-| USB re-enumerates | Capture dead until physical intervention (F-15) | Device re-detected by name |
-| Bad OTA update | Node unreachable, no rollback (F-06) | A/B revert on failed health check |
-| Power loss mid-write | Overlay protects root; boot partition already read-only | Unchanged, plus D-002 |
-| Second device added | Manifest writes race, data silently lost (F-14) | Per-device append-only paths |
-
-The pattern in the left column: every one of them is silent. That is the thing Phase 1 fixes, and it is worth more than any single bug on the list.
-
----
-
-## Security posture
-
-Current state, honestly: there is none. No authentication at any layer. The container is public by design because the dashboard has no backend. Credentials are literals in source. Sensor coordinates are published. Remote configuration is unsigned.
-
-The chain matters more than any single item. There is no backend, therefore the container must be public, therefore the coordinates and the audio and the detection history are public, therefore the only mitigations available are obscurity. Every finding traces back to the same missing piece.
-
-Phase 4 breaks the chain cheaply: container private, scoped SAS on both sides, config signed. That is real improvement and it is not authentication. A SAS token embedded in client JavaScript is obscurity, and it should be described that way to anyone who asks, including the client.
-
-Phase 5 fixes it properly by putting a backend at the seam. See `BACKEND-SCHEME.md`.
-
----
-
-## Known limitations
-
-Single unit, single region, no redundancy. If the Pi is down, there is no monitoring and nothing says so except the dashboard going stale after three minutes.
-
-The classifier was trained on 5-second clips at 22.05 kHz and its detection range is unvalidated. `IMPROVEMENT_REPORT.md` §2.5 raises the question of whether distant, attenuated blasts are detectable at all, and nobody has tested it against labelled distant recordings. This is a bigger open question than anything in the software.
-
-The manifest is capped at 5000 entries and truncates from the tail. Long-run history is lost with no archive.
-
-The bench unit has 512 MB of RAM against librosa, numpy and scikit-learn. Whether the Phase 2 architecture fits there is measurable, not assumable, and the answer feeds D-011.
-
----
-
-## Where the future backend goes
-
-`api/` as a fourth top-level folder, its own root, alongside the existing three. Nothing in the current structure moves to accommodate it. It sits at the seam: the Pi posts to it, the dashboard reads from it, and it holds every credential that currently lives on the device or in the browser.
-
-Scheme in `BACKEND-SCHEME.md`. Platform is D-003 and is deliberately undecided.
+Not the device's threading model (`raspberry-pi/docs/ARCHITECTURE.md`), not the API surface (`Dashboard-Detector/docs/API-CONTRACT.md`), not the blob schemas (`docs/DATA-CONTRACT.md`), not deployment (`Dashboard-Detector/docs/SERVER-INFRASTRUCTURE.md`, `raspberry-pi/docs/BENCH.md`).

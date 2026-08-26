@@ -1,7 +1,7 @@
 # Device architecture
 
-**Version:** v1.1.0 as deployed
-**Last updated:** 2026-08-02
+**Describes the `oceankind/` package as built (Phase 2).**
+**Last updated:** 2026-08-13
 
 Device-internal design. System-level architecture is in `../../docs/ARCHITECTURE.md`. Read this before making any design decision on the Pi.
 

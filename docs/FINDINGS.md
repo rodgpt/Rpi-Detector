@@ -24,7 +24,7 @@ Paths are post-restructure. Last verified: 2 August 2026.
 | F-04 | CRITICAL | Live Twilio credentials in source, backup and bytecode — **code side FIXED 2026-08-12; rotation still pending** | Reports, confirmed | 1 |
 | F-05 | HIGH | Deaf window is longest immediately after a detection — **FIXED 2026-08-13** (continuous capture; bench soak pending) | New (refines reports) | 1 |
 | F-06 | HIGH | OTA update can strand the node with no rollback | Reports, confirmed | 1 |
-| F-07 | HIGH | Blob container is public and unauthenticated | Reports, confirmed | 1 |
+| F-07 | HIGH | Blob container is public; device holds the storage account key — **fix decided 2026-08-25 (D-017), not yet implemented** | Reports, confirmed | 1 |
 | F-08 | HIGH | GPS coordinates hardcoded and published — **FIXED; fully closed 2026-08-13** (coords only in `_sites.json`) | Reports, confirmed | 1 |
 | F-09 | HIGH | Remote config cannot change detection sensitivity — **FIXED 2026-08-13** (real params tunable, clamped, published) | New | 1 |
 | F-10 | HIGH | Remote config is unsigned and unclamped — **FIXED; signature mandatory 2026-08-22** (no key = no remote config at all) | Reports, confirmed | 1 |
@@ -133,15 +133,29 @@ Two-phase update: disable overlay, reboot, `git pull` plus `pip install`, re-ena
 
 **Fix.** A/B code directories with a symlink switch, post-restart health check, automatic reversion. Prove it by deliberately failing an update on the bench Pi Zero 2W. Roughly 6 to 10 hours.
 
-### F-07 — Blob container is public and unauthenticated
+### F-07 — Blob container is public; device holds the storage account key
 
-Azure storage account `marfuturatest`, container `alerts`
+Azure storage account `marfuturatest`, container `alerts`; `raspberry-pi/src/oceankind/storage.py:35-43`
 
-Set to public anonymous read deliberately, because the static dashboard has no backend and no other way to read. Exposes full detection history, all audio recordings, live telemetry, and exact GPS coordinates. Verified downloadable with no credential.
+Two halves, one root cause.
+
+*Read side.* Set to public anonymous read deliberately, because the static dashboard has no backend and no other way to read. Exposes full detection history, all audio recordings, live telemetry, and exact GPS coordinates. Verified downloadable with no credential.
+
+*Write side.* The device authenticates with `BlobClient.from_connection_string`, i.e. the storage account key: full read, write, delete and list across every container and every site, sitting in `/etc/oceankind.env` on an unattended node nobody can reach. Blast radius is the obvious problem. The one that decides the fix is that **a shared account key on unreachable devices cannot be rotated** — rotating it silences the whole fleet with no way to redistribute the replacement, so there is no incident response short of losing the fleet.
 
 The absence of a backend is the root cause of most of the security findings here.
 
-**Fix.** Container to private, dashboard reads via scoped read-only SAS, device writes via scoped write SAS instead of the storage account key. Blocked on Azure access. Roughly 3 hours once unblocked. Permanent fix is the Phase 2 API.
+**Fix — decided 2026-08-25, see D-017. Not yet implemented.**
+
+Read side: `--allow-blob-public-access false` at account level, dashboard reads via a scoped read-only SAS until the Phase 2 API (D-003).
+
+Write side: one Entra service principal per device, RBAC scoped to the container, narrowed by an ABAC path condition on `sites/{site}/*`. Verified against Microsoft's docs that blob path conditions need no hierarchical namespace, so the v2 tree survives unchanged. Needs a custom role — no built-in role is write-only. Never delete, never list, never read another site. Three blobs stay readable by necessity (`remote_config.json`, `_sites.json`, the two aux stubs); a literal write-only credential would kill remote tuning silently, which would be a self-inflicted silent-deaf mode.
+
+Backstop regardless of credential model: blob versioning and soft delete on, so an overwrite by a compromised credential is recoverable.
+
+Estimate revised from 3 hours to roughly 8 to 12: the earlier figure assumed a SAS string swap. Per-device service principals add provisioning work, a custom role definition, `azure-identity` on the device, and a clock-skew failure path that must be loud — a Pi Zero has no RTC, and Entra token acquisition fails on a bad clock in a way indistinguishable from a network fault.
+
+Permanent fix is still the Phase 2 API.
 
 ### F-08 — Sensor GPS coordinates hardcoded and published
 

@@ -18,6 +18,14 @@ Categories: `[Contract]` `[Sec]` `[Ops]` `[Client]` `[Docs]` `[Data]`
 
 - [ ] **[Ops] Three field questions** — Does the power chart render (answers D-002, F-16). Which user runs the service (answers D-010, sets F-03 urgency). Which ADC is installed (answers D-009). All one-line answers from whoever can reach the unit. All three change what gets built first.
 
+### Cross-codebase
+
+- [ ] **[Contract] Reconcile this repo's DECISIONS.md against `Dashboard-Detector` D-019/D-020** — Found 2026-08-25 while writing `research/azure-storage-deployment.md`. The dashboard repo decided a backend (D-019, 2026-08-21: FastAPI + Postgres + nginx, three containers) and v2-only with device config in a blob (D-020, 2026-08-22, which states it **supersedes D-016**). This repo's `DECISIONS.md` still carries D-003 as *BLOCKED on Azure access* and D-016 with no supersession note. Per the umbrella `CLAUDE.md`, stack-level decisions belong in the root `DECISIONS.md` and feed downward; D-019 and D-020 are stack-level and live only in the dashboard's copy. Either promote them here or record explicitly that the dashboard's copy is authoritative for them — but the current state is the exact silent divergence the umbrella exists to prevent.
+
+- [ ] **[Sec] Confirm the dashboard's storage credential shape against D-017** — `Dashboard-Detector/docs/SERVER-INFRASTRUCTURE.md` (2026-08-22) says the backend holds the blob credential, the browser never reaches storage, and clips are proxied through `/api/`. That settles the read half of F-07 better than a browser-held SAS would, and it means no CORS is needed. Two things still to confirm with that side: that the backend's credential is scoped (read across sites, plus write to `sites/{id}/remote_config.json` only per D-020) rather than the account key, and that it points at the **new** account once it exists. D-017 governs the device; this is its counterpart.
+
+- [ ] **[Ops] Revoke-on-theft is a runbook item, not just a permission** — D-017 makes a stolen unit a 30-second revoke, but only if someone notices and knows the procedure. The signal is a heartbeat gap. Needs: what to watch, who can revoke, and the explicit accepted risk that a revoked-but-standing unit loses its `remote_config.json` channel and waits for a site visit. Goes in `docs/RUNBOOK.md` when D-002 unblocks it.
+
 ### Client-facing
 
 - [ ] **[Client] Correct the write-SAS claim in `SYSTEM_REVIEW.md`** — §4.3 says the dashboard stores a write-capable SAS in `localStorage`. It does not; the constant is dead. See X-01. Correct it before the client's side finds it, because one falsified claim discounts the twelve that are true.

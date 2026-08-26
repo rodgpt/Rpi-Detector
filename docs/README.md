@@ -10,17 +10,17 @@ The Pi and the dashboard are one system coupled through blob storage, so working
 
 Read in this order on a cold start.
 
-**[FINDINGS.md](FINDINGS.md)** — Twenty defects consolidated from every audit, verified line by line against current source, ranked, tagged by phase. Four can silently stop the system from detecting. This is the working register; the audits below are its sources.
+**[FINDINGS.md](FINDINGS.md)** — The defect register: 23 entries verified against source, ranked, most now FIXED with dates. Canonical here; the dashboard repo mirrors it. The audits below are its sources.
 
-**[ARCHITECTURE.md](ARCHITECTURE.md)** — How the Pi, blob storage, WhatsApp, the dashboard and the future backend fit together. Control flow today and after the async refactor. Failure modes and what each becomes.
+**[ARCHITECTURE.md](ARCHITECTURE.md)** — The system as built: device package, private storage, FastAPI/Postgres backend, React frontend, and the signed config path. Failure modes as they behave today.
 
-**[DATA-CONTRACT.md](DATA-CONTRACT.md)** — The exact shape of every blob crossing between the codebases, extracted from source. Unenforced: no schema, no version, no test. Changing anything here changes both codebases and they ship together.
+**[DATA-CONTRACT.md](DATA-CONTRACT.md)** — The v2 contract, normative for both codebases. Enforced: `tools/validate_contract.py`, the device conformance test, and the dashboard's `make contract` all check it. Canonical here; the dashboard mirrors it byte for byte.
 
 **[PROGRESS.md](PROGRESS.md)** — Stack-level phase state. Rolls up both codebases. Phase numbers are shared across all three `PROGRESS.md` files.
 
 **[TODO.md](TODO.md)** — Cross-cutting items, client-facing actions, and the three field questions that are blocking decisions.
 
-**[BACKEND-SCHEME.md](BACKEND-SCHEME.md)** — Phase 5 specification. Tracks the scheme, not the software: endpoints, data model, authentication, credential placement. The platform is deliberately undecided.
+**[BACKEND-SCHEME.md](BACKEND-SCHEME.md)** — SUPERSEDED. The backend is built (Dashboard D-019/D-020/D-021). Kept as the spec-versus-built record.
 
 **[RUNBOOK.md](RUNBOOK.md)** — Intentionally empty. Waiting on decisions it would otherwise document wrongly.
 

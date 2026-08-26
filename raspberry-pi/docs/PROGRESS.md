@@ -127,7 +127,13 @@ Aux blobs (`acoustic_indicators.json`, `ocean_conditions.json`): the device writ
 - [ ] Post-restart health check, automatic reversion (R-7.1, F-06)
 - [ ] **Prove it: deliberately break an update on the bench unit and watch it revert**
 - [ ] Watchdog for the hang case (R-2.7)
-- [ ] Scoped write credential instead of the storage account key (R-8.4, F-07)
+- [ ] Scoped write credential instead of the storage account key (R-8.4, F-07) — **mechanism decided, D-017**: one Entra service principal per device, custom write-only role, ABAC condition on `sites/{site}/*`, never delete, never list. Sub-tasks:
+  - [ ] Custom RBAC role definition (`blobs/write` + `blobs/add/action` only) and the ABAC condition, scripted so provisioning is repeatable
+  - [ ] `_get_blob_client` accepts a credential other than a connection string (`azure-identity`); connection string stays available for bench and local runs
+  - [ ] Clock-skew failure is loud — a Pi Zero has no RTC, and Entra auth failure must reach `health.degraded_reason` and `status.json`, not look like a network fault
+  - [ ] Read allowlist verified against the three blobs the device actually reads (`remote_config.json`, `_sites.json`, the aux stubs) — a literal write-only credential kills remote tuning silently
+  - [ ] Blob versioning and soft delete on, so a compromised credential's overwrite is recoverable
+  - [ ] **Prove it: revoke one device's credential on the bench and confirm the failure is loud, bounded and drains from the spool on re-provision**
 - [ ] Per-device credential in `/etc/oceankind.env` and the config poll live against the deployed backend (R-8.3, F-10). Unreachable API means keep the last valid config, never fall back to defaults
 - [ ] Write `docs/RUNBOOK.md` now that the decisions it documents exist
 - [ ] Handover procedure. **We do not deploy; the client does** (D-015)

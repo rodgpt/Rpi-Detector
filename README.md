@@ -99,7 +99,7 @@ Schemas in `docs/DATA-CONTRACT.md`. **This repository holds the canonical copy; 
 
 **Writes go to RAM.** The overlay filesystem means anything written at runtime consumes memory and vanishes on reboot. The clip archive caps at 300 files (~290 MB) since Phase 1; discards are published in `health.clips_dropped`.
 
-**`/boot/firmware` is read-only.** The telemetry CSV is written there and fails silently, so the power chart may never populate. Still true — fixed in Phase 2 (F-16).
+**`/boot/firmware` is read-only.** Nothing writes there anymore — the telemetry path was the F-16 defect, fixed in Phase 2. Runtime state goes to tmpfs and is flushed deliberately.
 
 **The deployed units are prototypes, and this code no longer speaks their format.** Since D-016 (2026-08-13) the device emits the **v2 contract only** (`sites/{site}/…`, one blob per event, no manifest) to a **new** storage container. The prototypes at Zapallar and Matanzas keep writing v1 to the old blob, the dashboard keeps reading it, and nothing from this tree deploys to them. The new fleet is invisible to the dashboard until its v2 reader exists.
 

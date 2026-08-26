@@ -8,7 +8,7 @@ The device emits it, verified end to end by `raspberry-pi/tools/v2_conformance_t
 
 Derived by walking the five dashboard tabs, listing every field each one consumes, and working backwards. Client has confirmed the blob shape is ours to define.
 
-Last updated 2026-08-22.
+Last updated 2026-08-26 (**Event upload** added — dashboard D-022).
 
 **Implementation notes, normative for consumers:**
 
@@ -20,17 +20,22 @@ Last updated 2026-08-22.
 - The device merges its own entry into `_sites.json` at startup. A rare read-modify-write, tolerable until the backend owns the registry.
 - If an event blob upload fails the event is spooled locally, bounded at 500, and retried each heartbeat. Spool overflow discards oldest and counts them in `health.events_dropped`. No event is lost silently.
 - Device configuration arrives as a signed blob. Full specification in **Device configuration** below, which is the only description of it in this document.
+- The device also POSTs each event to the backend as it happens, **in addition to** writing the blob — never instead of it. Full specification in **Event upload** below. `captured_utc` MUST carry a UTC offset; that is now a rule rather than a convention, and the endpoint rejects a naive value.
 
 ---
 
 ## Who reads this
 
-Four hops, and this document governs the first two:
+Four hops, and this document governs everything up to the backend:
 
 ```
 device  ->  blob storage  ->  backend API  ->  browser
-        \____ this contract ____/   \__ API-CONTRACT.md __/
+   │    \____ this contract ____/   \__ API-CONTRACT.md __/
+   └──────► POST /api/devices/events ─┘
+            also this contract — see Event upload
 ```
+
+The storage path is the durable one and the record. The direct POST is a latency path that carries the same event and is allowed to fail; it is specified here rather than only in `API-CONTRACT.md` because it crosses between the two codebases, which is what this document is for.
 
 Until the backend existed, the browser read storage directly and every rule below was a rule about what the browser had to tolerate. That is no longer true. **The backend is the only consumer of these blobs.** It reads storage with a credential the browser never sees, validates what it finds against this contract, and serves a paginated HTTP API described in `API-CONTRACT.md`.
 
@@ -41,6 +46,8 @@ The schemas do not change. Who is obliged by them does. Three rules in particula
 - **An unknown `schema_version`** is now the backend's problem. It degrades visibly, serves what it understood, and reports the mismatch through the API so the browser can render it. It must not return an empty page and it must not 500.
 
 Traffic runs the other way for exactly one blob: the device **reads** its configuration from storage, signed. See **Device configuration** below.
+
+The device also **writes** directly to the backend, once per event, on a path that is not storage at all. See **Event upload** below. Both directions are outbound from the device; nothing ever connects *to* it, which is what lets an unattended node sit behind a cellular NAT with no port forwarding, no VPN and no static address.
 
 ---
 
@@ -93,9 +100,15 @@ alerts/                                   (container, unchanged)
           {event_id}.wav
 ```
 
-Date-partitioned event paths make "this site, last 24 hours" a prefix listing. No index, no query engine, no database (D-004). Clips sit under a parallel tree so a listing of events never drags audio into the response.
+Date-partitioned event paths make "this site, last 24 hours" a prefix listing, with no query engine involved. Clips sit under a parallel tree so a listing of events never drags audio into the response.
+
+What a consumer builds *downstream* of these blobs, including an index over them, is its own concern and changes nothing the device writes. The two obligations below are the only ones this layout imposes on such a consumer.
 
 `{event_id}` is a UUID. It appears in both the event blob name and the clip name so the two are joinable without parsing timestamps.
+
+**Partitions are keyed on capture, not arrival.** The date directories are derived from `captured_utc`. A device that loses its link spools locally and drains when it returns, so an event captured on a Tuesday can appear in Tuesday's prefix on the Friday. Nothing rewrites it and nothing moves it; it simply shows up late, in a directory a consumer may already have read to the end of.
+
+Two obligations follow for anything maintaining a derived view of these events. It must re-examine a **trailing window** of days rather than watching only the current one, wide enough to cover the longest outage it intends to survive. And it must key on `event_id`, so re-reading a prefix is idempotent rather than duplicating. Both are cheap. Neither is optional, and a consumer that skips them will under-report detections while looking perfectly healthy, which is the failure mode this whole system exists to make impossible.
 
 **Index tags on event blobs**, for the filtering that paths cannot express:
 
@@ -374,7 +387,7 @@ Verification is mandatory. The device compares with `hmac.compare_digest`, and a
 
 The client chooses thresholds. We bound them. Clamping happens in the backend, before signing, so the device and the operator see the same number. A clamped value is applied and reported, never silently accepted and never rejected: a tuning mistake must not strand a unit on stale config. `detection_mode` is the exception, rejected rather than clamped, because an enum typo would disable detection.
 
-Applied values appear in `status.json → detection.thresholds`, which closes F-09's tuning half (R-3.6).
+Applied values appear in `status.json → detection.thresholds`, which closes F-09's tuning half (device R-3.6).
 
 | Parameter | Type | Range | Default | Why bounded |
 |---|---|---|---|---|
@@ -415,6 +428,82 @@ Device additions beyond the four convergence items, per the prose above: `detect
 The remaining provisioning step: **generate the shared key and put it in both places** (backend secret store, device `/etc/oceankind.env`). Until then the backend refuses to publish and the device refuses to apply, which fails safe on both ends.
 
 The blob is normative because the device side is verified and shipping, and because it needs no device credential to exist first (D-017, D-018 are about a different problem). `GET /api/devices/config` may stay as a read-only debugging view, but it must return this exact document, and the backend must gain the writer that puts it in storage.
+
+---
+
+## Event upload
+
+**Status: SPECIFIED, not yet built on either side.** Specified 2026-08-26 under dashboard D-022 and dashboard R-6.3.
+
+The device POSTs each event to the backend as it happens, **in addition to** writing the event blob. Two paths, deliberately, and they are not alternatives:
+
+```
+device ──► blob storage ──► backend      durable. the record. what reconcile checks against
+   └─────► POST /api/devices/events      fast. may fail. carries nothing the blob does not
+```
+
+### The invariant
+
+**The blob write happens regardless of what this endpoint does, and no event is ever dropped because of a push outcome.**
+
+That sentence is the whole contract. Everything below is detail. A device that skips the blob write when the POST succeeds has broken the system in a way nothing will detect: the backend's reconcile pass compares storage against its index, so with no blob it compares its index to itself, reports green, and means nothing.
+
+The event JSON is roughly 600 bytes against roughly 960 KB for the clip it accompanies — about 0.06% of what the device already uploads for that detection. The blob write is not a cost worth optimising away.
+
+### Request
+
+```
+POST /api/devices/events
+X-Device-Id:  Rpi_bench
+X-Device-Key: <the key issued once at registration>
+Content-Type: application/json
+
+<the event document, byte-identical to what goes in the blob>
+```
+
+**One event per request.** Not batched, and deliberately so: an event should reach a human as it happens, not when four more have accumulated behind it. A device draining a spool after an outage sends them one at a time; at the volumes this system actually sees that is tens of requests, and a device holding hundreds of queued detonation alerts has a bigger problem than request count.
+
+The body is the event document exactly as specified under **Event blob** above. There is no wrapper, no envelope and no second schema. The backend puts no response model over it, for the same reason it puts none over the rollups: a field the device adds must reach the index, not be silently eaten on the way in.
+
+### `captured_utc` MUST carry a UTC offset
+
+`"2026-08-08T14:32:01.123456+00:00"`, never `"2026-08-08T14:32:01.123456"`.
+
+This was already true of every example in this document and of everything the device emits; it is now a rule, because two things break silently without it. A naive timestamp cannot be compared against an offset-aware one — in Python that raises rather than returning a wrong answer, which is how it reached a 500 in the dashboard's query path. And the date partition is derived from this field, so a naive value can file an event under the wrong day, where a consumer reading a trailing window will not find it.
+
+The endpoint rejects a naive `captured_utc` with `400`. Loudly, at the boundary, rather than at a query three weeks later.
+
+### Idempotent on `event_id`
+
+Re-posting an event already indexed is **success, not conflict**. It returns `202`, the same as the first time.
+
+This is what makes every retry path safe by construction rather than by care: an ambiguous timeout, a spool that drains twice, a reconcile pass that picks up an event the push already delivered. The device is never required to track what it has successfully sent. There is no `409` on this route.
+
+### Site scoping
+
+The event's `site` MUST match the site the posting device is registered to. A mismatch is `403` and the event is not indexed.
+
+This is containment, not revocation. Revoking a compromised unit is deleting or deactivating its device record, which is immediate and total. Site scoping is what limits the damage in the window before anyone notices: a stolen key can write to its own site and nowhere else, so one compromised unit cannot inject detections across the fleet.
+
+### Status codes, and what the device does with each
+
+| Code | Means | Device does |
+|---|---|---|
+| `202` | Indexed, or already was | Drop from the push queue. **Blob still written** |
+| `400` | The posted document is malformed, or `captured_utc` is naive | A device-side bug. Log loudly, keep the blob, stop retrying this event |
+| `401` | Bad or revoked credential | Stop retrying. Surface in `health.degraded_reason` — a revoked device that silently stops reporting is indistinguishable from a dead one |
+| `403` | `site` does not match this device | Provisioning error. Log loudly, keep the blob, stop retrying |
+| `5xx`, timeout, connection refused | We are down, deploying, or unreachable | Retry from the spool on the next heartbeat. Normal, expected, not an error condition |
+
+`409` is never returned. See idempotency above.
+
+**A rejection nobody sees is a silent failure**, so `400`, `401` and `403` are surfaced by the backend where `last_seen` already is — in the admin panel, against the device — not written to a log and forgotten. A device whose every push has been rejected for a week must be visible as such without anyone thinking to look.
+
+### What this does not change
+
+The device keeps its storage credentials and keeps writing blobs and clips exactly as before. Nothing in **Event blob**, **Path scheme** or the spool behaviour moves. A backend that has never received a single POST still holds a complete and correct record, arriving via the reconcile pass; this endpoint buys latency and nothing else.
+
+Consumers maintaining a derived view still owe both obligations under **Path scheme** — trailing window, keyed on `event_id`. This endpoint does not relax either, and a consumer that treats the push as its ingestion mechanism has reintroduced exactly the silent under-reporting those obligations exist to prevent.
 
 ---
 

@@ -9,7 +9,7 @@ Self-contained. Everything referenced is in this repository.
 ## Before ANY task
 
 1. **`REQUIREMENTS.md`** — what this must do. Numbered, testable. The spec
-2. **`docs/FINDINGS.md`** — 24 verified defects. **Read F-21 first**; the detector may not detect the thing this system exists to detect
+2. **`docs/FINDINGS.md`** — 23 verified defects, most now fixed with dates. **Read F-21 first**; the detector may not detect the thing this system exists to detect
 3. **`raspberry-pi/docs/ARCHITECTURE.md`** — process model, threading, state machine, power, filesystem. **Read before any design decision**
 4. **`docs/DATA-CONTRACT.md`** — everything this device writes is consumed by the dashboard. Canonical copy, the dashboard mirrors it
 5. **`DECISIONS.md`** — what is settled, what is open, what is blocked
@@ -94,7 +94,7 @@ Phases are in `raspberry-pi/docs/PROGRESS.md`, numbered consistently with the da
 
 Fail-loud work first, because it needs no Azure and removes the worst risk per hour. Then continuous capture. Then the detector registry. Then contract and storage. Then deployment.
 
-**Do not begin the async refactor before the fail-loud work is done.** Threading bugs and silent failures are indistinguishable in the field, and you will burn days separating them.
+Fail-loud (Phase 1) and continuous capture (Phase 2) are **done** — the code is the threaded `oceankind/` package, not the monolith. Sequencing that still binds: prove rollback on the bench before any OTA work touches a real unit, and no Phase 4 security work without the real Azure account.
 
 ---
 

@@ -19,7 +19,7 @@ Work is driven by `FINDINGS.md` (what is broken) and `../DECISIONS.md` (what has
 ## Phase 0: Structure and context **COMPLETE**
 
 - [x] Four-folder structure, each codebase a self-contained root
-- [x] Twenty defects catalogued and verified against source (`FINDINGS.md`)
+- [x] Twenty defects catalogued and verified against source (register since grown to 23) (`FINDINGS.md`)
 - [x] Reversal manifest for the restructure (`MOVES.md`)
 - [x] Data contract extracted and documented (`DATA-CONTRACT.md`)
 - [x] Decision register opened (`../DECISIONS.md`)
@@ -120,14 +120,25 @@ Client decision (D-016): prototypes frozen on v1 in the old blob, dashboard keep
 
 ---
 
-## Phase 5: Backend **NOT CONTRACTED — specified only**
+## Phase 5: Backend **BUILT, in `Dashboard-Detector`**
 
-Delivered as a written specification and quote, not as code. Depends on D-003 and D-004.
+This entry described the backend as a written specification and a quote. That is out of date: the approved presupuesto contracts authentication, differentiated users and an administration panel, none of which a static page can do, and the backend has been built and tested since 2026-08-12. It lives in the dashboard repository and nothing about it is device work.
 
-- [ ] Backend platform decided and written up as an analysis doc (D-003)
-- [ ] Datastore decided (D-004)
-- [ ] `BACKEND-SCHEME.md` filled in with the concrete scheme
-- [ ] Estimate and scope note handed over
+- [x] Backend platform decided and built: FastAPI in a container, no cloud identity, no cloud runtime (D-003)
+- [x] Datastore decided (D-004). Postgres for users, roles, site assignments and device credentials
+- [x] Datastore **reopened and extended** (D-004 reopened → `Dashboard-Detector` D-021): detection events are indexed in Postgres because reading one blob per event does not survive a busy week. **No device work follows**
+- [x] `BACKEND-SCHEME.md` superseded by the built system and `Dashboard-Detector/docs/ARCHITECTURE.md`
+- [x] Device-facing half specified and converged: signed configuration blob (D-020), per-device credentials (D-017, D-018)
+
+---
+
+## Dashboard-only work that does not touch this repository
+
+`Dashboard-Detector` Phase 1I builds a derived index of detection events in Postgres (D-021, reopening D-004). Recorded here so nobody re-derives it from this side.
+
+**The device changes in no way.** It does not know the index exists and it writes exactly what `DATA-CONTRACT.md` specifies. The contract gained one paragraph, under **Path scheme**, stating that partitions are keyed on `captured_utc`, so an event spooled during an outage arrives late in an earlier day's prefix. That describes behaviour the device already has. No field, no path, no schema changed.
+
+The one thing it asks of us is to keep that behaviour true: `captured_utc` decides the partition, and `event_id` stays unique and stable. Both are already contract requirements.
 
 ---
 

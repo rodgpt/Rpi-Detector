@@ -6,6 +6,9 @@ What the field device must do. Every requirement is testable and states how. Der
 
 Last updated 2026-08-08.
 
+
+> **Requirement numbering is per repository.** 41 R-IDs exist in both repos meaning different things (our R-1.1 is "never stop capturing"; the dashboard's is "one container"). **Always qualify a citation of the other repo's requirements** (`dashboard R-5.1`), never a bare number. Same convention as the decision registers.
+
 ---
 
 ## Scope

@@ -13,11 +13,11 @@ It is a stub on purpose. Writing it now would document decisions that have not b
 | Decision | Why the runbook needs it |
 |---|---|
 | **D-002** SD card protection method | Determines every recovery procedure, where state lives, and what an operator must do before and after an update |
-| **D-005** Deployed layout reconciliation | Determines what "deploy" actually means and which paths appear in every command |
+| ~~D-005~~ | CLOSED 2026-08-13, moot under D-016: prototypes are frozen, new units provision cleanly from `setup.sh` |
 | **D-010** Which user the service runs as | Every command in this document runs as somebody |
 | **F-06** OTA rollback | There is no point documenting a recovery procedure that does not exist. Today a failed update strands the node |
 
-Write this after Phase 3, once the A/B update path exists and has been proven by deliberately failing an update on the bench unit. Before that, the honest runbook is one sentence: do not update the production unit.
+Write this after Phase 5, once the A/B update path exists and has been proven by deliberately failing an update on the bench unit. Before that, the honest runbook is one sentence: do not update the production unit.
 
 ---
 
@@ -27,7 +27,7 @@ Left here so whoever writes it knows the shape.
 
 **Deployment.** How to push a change to the production unit. What the health check verifies. How to confirm it took. How to roll back deliberately.
 
-**Verification after deploy.** What a healthy unit looks like in `status.json` and on the dashboard within the first fifteen minutes. Specifically: `detector_healthy` true, `duty_cycle_pct` above 99, `clips_dropped` not climbing, `last_seen` fresh, power chart still drawing.
+**Verification after deploy.** What a healthy unit looks like in `status.json` and on the dashboard within the first fifteen minutes. Specifically: `health.detector_ok` true, `duty_cycle_pct` above 99, `clips_dropped` not climbing, `last_seen` fresh, power chart still drawing.
 
 **Diagnosis.** A symptom-to-cause table. The dashboard is stale. Detections stopped. Battery alerts are duplicating. The power chart is empty. The spectrogram will not open. Each with the check that distinguishes causes, and each pointing at the relevant entry in `FINDINGS.md`.
 

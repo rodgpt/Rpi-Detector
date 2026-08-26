@@ -10,6 +10,8 @@ Domain-only choices that affect nothing outside their folder can live in that fo
 
 ---
 
+> **Decision numbering is per repository, not global.** `Rpi-Detector` and `Dashboard-Detector` each keep their own sequence, and the same number can mean different things in each. **Always qualify a citation from the other repository** (`Rpi-Detector D-017`), never a bare number. Known divergences are flagged in the entries themselves: D-016 and D-017.
+
 ## Index
 
 | ID | Status | Decision | Blocks |
@@ -30,6 +32,7 @@ Domain-only choices that affect nothing outside their folder can live in that fo
 | D-014 | DECIDED | Detector registry, not a selector. Both detectors kept | Phase 2, data contract |
 | D-015 | DECIDED | Scope boundary: we build plumbing, client provides detection science | Everything |
 | D-016 | DECIDED | v2 cutover now: new units write v2 to a new blob; prototypes frozen on v1 | Contract, Phase 4, D-005, D-007 |
+| D-017 | DECIDED | One credential per device, write-scoped, revocable. No account key on any node | F-07, provisioning, dashboard read path |
 
 ---
 
@@ -75,7 +78,7 @@ Read-write root with aggressive write minimisation. Simplest mentally, relies en
 
 **Options under consideration.** Azure Functions as a standalone HTTP API. Azure Static Web Apps with a managed API, which is interesting because the dashboard is already static-hosted on Azure and this bundles hosting, an API surface and a managed authentication layer in one product, potentially closing two findings at once. Azure Container Apps if the API outgrows serverless. Something non-Azure if there is a reason, though staying inside the existing subscription is worth real weight given the storage account, the IoT Hub and the static hosting already live there.
 
-**Explicitly not decided.** FastAPI plus Postgres is the default elsewhere and is not obviously right here. Do not assume it.
+**Superseded 2026-08-25: it IS decided.** `Dashboard-Detector` D-019 built FastAPI + Postgres + React in three containers, tested. This entry stays as the record that the platform was chosen deliberately — by building and proving, not by default — and must no longer steer readers away from the answer that shipped.
 
 **What to do before deciding.** Verify current capabilities and pricing from Microsoft's own documentation rather than from memory, per the research pipeline in `docs/research/RESEARCH.md`. Write it up as an analysis doc.
 
@@ -85,7 +88,7 @@ Read-write root with aggressive write minimisation. Simplest mentally, relies en
 
 ## D-004 — Backend datastore
 
-**Status:** PROPOSED, revised 2026-08-08. Likely answer: no datastore at all.
+**Status:** REOPENED and superseded 2026-08-22 by `Dashboard-Detector` D-021. Was: PROPOSED, revised 2026-08-08, likely answer no datastore at all. **No device work follows; see the end of this entry.**
 
 **Context.** The assumption was that filtering and pagination require an index, and `docs/IMPROVEMENT_REPORT.md` §3.5.2 proposed Cosmos DB while conceding SQLite would suffice. Checking what Azure Blob Storage actually does server-side changes that conclusion.
 
@@ -102,6 +105,14 @@ Read-write root with aggressive write minimisation. Simplest mentally, relies en
 **Proposal.** No datastore. Per-device, per-date blob paths, index tags for the few genuinely queryable attributes, conditional requests on the status endpoint, and client-side filtering within a bounded fetched window. At a few hundred detections a year this carries the system at a hundred times current volume.
 
 **Reopen when.** A requirement appears for `OR` conditions, sorting on arbitrary fields, cross-device aggregates, or joins. None are on the roadmap.
+
+**REOPENED 2026-08-22, on that condition.** Superseded by `Dashboard-Detector` D-021: the dashboard indexes detection events in Postgres and serves queries from there. Two of the four triggers fired. Cross-site views are on the roadmap, which is cross-device aggregates; and the volume assumption above, "a few hundred detections a year... a hundred times current volume", is wrong by roughly three orders of magnitude. It predated D-008, which records cooldown-suppressed detections rather than discarding them, so one alerting window is one blob and a single ten-minute boat pass is around 120 of them. The projection is millions a year at fleet scale, not tens of thousands.
+
+The reasoning in this decision was sound and its storage analysis still holds; the input was wrong.
+
+**No device work follows from it.** The device does not know the index exists and writes exactly what `docs/DATA-CONTRACT.md` already specifies. The contract gained one paragraph, under **Path scheme**, stating that partitions are keyed on `captured_utc` so a spooled event arrives late in an earlier day's prefix. That is a description of behaviour the device already has, not a change to it. The index tags this decision proposed were never implemented and are not needed; D-021 records why.
+
+Nothing here reopens for the device unless the dashboard asks it to write a field it does not already write, and D-021 explicitly commits that it will not.
 
 **Consequence for the backend.** It shrinks. The backend is not there to be a query engine; it is there because there is nowhere else to put a secret. Note that Find Blobs by Tags needs a SAS carrying the Filter permission, so the backend still wants to be the caller rather than the browser, but it needs no database behind it.
 
@@ -312,7 +323,9 @@ Theirs: what signal to look for, whether a detector works, threshold values on s
 
 ## D-016 — v2 cutover now, on fresh storage. Prototypes frozen
 
-**Status:** DECIDED, 2026-08-13 (client)
+**Status:** DECIDED, 2026-08-13 (client). **This is the stack-level decision** and the one `DATA-CONTRACT.md` cites.
+
+`Dashboard-Detector` carries a different, now-superseded D-016 about a removable v1 adapter. When either repo says D-016 without qualification, it means this one.
 
 **Context.** The v2 contract existed as a design with a Phase 4 migration plan: dual-write, history backfill, deep-link preservation, coordinated cutover with the dashboard. The client reframed it: the deployed units are prototypes, their data stays where it is, and the next unit starts clean.
 
@@ -325,3 +338,47 @@ Theirs: what signal to look for, whether a detector works, threshold values on s
 **Proof.** `raspberry-pi/tools/v2_conformance_test.py` drives the production emit code into a local tree and runs `tools/validate_contract.py` over it: CONFORMANT. That validator is the acceptance test for the contracted work (R-5.6).
 
 **Trickles into.** `docs/DATA-CONTRACT.md` (as-built section), `raspberry-pi/docs/PROGRESS.md` Phase 4, the stack `PROGRESS.md`, dashboard Phase 4 (v2 reader against new storage), F-08, F-14, D-005 (closed), D-007 (device side done).
+
+---
+
+## D-017 — One credential per device, write-scoped and revocable
+
+**Status:** DECIDED, 2026-08-25
+
+**Not the same as `Dashboard-Detector` D-017**, which covers provisioning the backend's per-device *API* key onto a unit at the bench. This one is about the *storage* credential. They are complementary and both apply; the numbers collided because the registers are independent.
+
+**Context.** The device authenticates to blob storage with a storage account connection string (`OCEANKIND_STORAGE_CONNECTION_STRING`, `storage.py:35-43`). That is the account key: full read, write, delete and list over every container, every site. It sits in `/etc/oceankind.env` on an unattended node on a coastline, in a system whose adversaries have a direct interest in the hardware (F-08).
+
+Blast radius is the obvious problem. The sharper one is that **a shared account key on unreachable devices cannot be rotated.** If it leaks, the options are to rotate it and silence the entire fleet with no way to redistribute the new key, or to leave it compromised. Neither is an incident response. This must be settled before the next batch of units lands, because credentials cannot be retrofitted onto hardware nobody can reach.
+
+**Decision.** Three rules, effective for the new storage account and every unit provisioned against it.
+
+1. **One credential per device.** Never shared. Revoking one unit affects only that unit; every other node keeps running.
+2. **Write-scoped, never delete, never list, never read another site.** A device has no legitimate reason to delete a blob or enumerate a container.
+3. **No storage account key on any node, ever.** The account key exists on developer machines for bootstrap and validation only.
+
+**Mechanism.** Microsoft Entra service principal per device, RBAC scoped to the container, narrowed with an ABAC path condition on `sites/{site}/*`. Verified against Microsoft's documentation: blob path conditions do **not** require hierarchical namespace and work on a plain StorageV2 account, so the v2 tree in `docs/DATA-CONTRACT.md` is preserved unchanged. No built-in role is write-only — `Storage Blob Data Contributor` includes read and delete — so this needs a custom role carrying only `blobs/write` and `blobs/add/action`. Credential is a certificate rather than a client secret, so it is per-device rotatable and does not leak through logs.
+
+Directory-scoped SAS (`sr=d`) was considered and rejected: it requires hierarchical namespace. Container-scoped SAS was rejected because it forces one container per site, which breaks the `sites/{site}/…` layout. IoT Hub file upload brokering was rejected because the hub rewrites the blob path to `{deviceId}/{blobName}` and the prefix cannot be controlled; bending the contract to suit a credential mechanism is the wrong trade.
+
+**"Write-only" is not literal — there is a read allowlist.** The device reads three things today and a literal write-only credential would break two of them silently:
+
+| Blob | Read by | Disposition |
+|---|---|---|
+| `sites/{site}/remote_config.json` | `main.py:204` | **Read required.** D-015 makes remote tuning without a firmware update non-negotiable |
+| `_sites.json` | `storage.py:225`, read-modify-write at startup | Read + write required at container root until the backend owns the registry |
+| `sites/{site}/acoustic_indicators.json`, `ocean_conditions.json` | `storage.py:255`, existence check | Read may be dropped; `ensure_aux_blobs` must degrade rather than fail |
+
+Everything else stays denied. A stolen credential can append to one site's prefix and read that site's config. It cannot read another site, enumerate the container, or destroy anything.
+
+**Defence in depth, independent of the credential model.** Blob versioning and soft delete on, so an overwrite by a compromised credential is recoverable and the scientific record is append-only in practice. `--allow-blob-public-access false` at account level, which closes the other half of F-07 by construction.
+
+**What it costs.** `azure-identity` on the device and a rewrite of `_get_blob_client`. Entra token acquisition requires a correct clock: a Pi Zero has no RTC, and a long brownout followed by unreachable NTP produces an authentication failure that is indistinguishable from a network fault. That failure path must be loud (`health.degraded_reason`, `status.json`), or this fix introduces a silent-deaf mode of its own. Provisioning grows a per-device step that cannot be a copy-paste of one env file.
+
+**Accepted risk.** If a unit is compromised but still standing, revoking its credential also removes its `remote_config.json` channel, so it cannot be re-provisioned remotely — it waits for a site visit. Events spool locally (`EVENT_SPOOL_MAX`) and drain on reconnection, so a bounded outage loses nothing; an unbounded one drops oldest-first and counts the drops. This is acceptable precisely because the credential is per-device: the same event under a shared key costs the entire fleet.
+
+**Not now.** A secure element (ATECC608A, or a TPM module) would make the key physically unextractable from the SD card. That is a board revision and belongs to the hardware conversation for the next batch, not to F-07.
+
+**The read half of F-07 is settled elsewhere.** `Dashboard-Detector` D-019 (2026-08-21) builds a FastAPI backend, and its `docs/SERVER-INFRASTRUCTURE.md` states the blob credential is *"held here and nowhere else"* — the browser never reaches storage, and clips are proxied through `/api/`. That is a better answer than the browser-held read-only SAS this decision originally proposed, and it needs no CORS. D-017 therefore governs the **device write** credential only. Confirm with that side that the backend's own credential is scoped rather than the account key, and that it points at the new account. Tracked in `docs/TODO.md`.
+
+**Trickles into.** F-07 (this is its fix), `raspberry-pi/docs/PROGRESS.md`, `raspberry-pi/docs/TODO.md`, `docs/research/azure-storage-deployment.md`, provisioning scripts, `docs/RUNBOOK.md`.

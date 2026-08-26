@@ -1,11 +1,13 @@
 # Backend scheme
 
-**Status:** specification only. Not built, not contracted, platform undecided.
-**Last updated:** 2026-08-02
-
-This document tracks **the scheme, not the software**: what the endpoints are, what the data model looks like, what authenticates, and where credentials live. The platform choice is D-003 and is deliberately open. Everything here should survive that decision.
-
-If you are about to write "FastAPI" or "Postgres" into this document, stop and read D-003 first.
+> **SUPERSEDED (2026-08-25). The backend is built.** This file was the
+> specification written before it existed, and its two central claims are dead:
+> the platform is decided (FastAPI + Postgres + React, three containers —
+> Dashboard D-019) and "likely no datastore at all" was reversed by Dashboard
+> D-021 (Postgres index of detection events; D-004 reopened on its own terms).
+> The living documents are `Dashboard-Detector/docs/ARCHITECTURE.md`,
+> `API-CONTRACT.md` and `SERVER-INFRASTRUCTURE.md`. Kept as the record of what
+> was specified versus what got built. Do not implement from this file.
 
 ---
 
