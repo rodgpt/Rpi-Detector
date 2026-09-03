@@ -39,16 +39,60 @@ _audio_alert_sent = False
 # "Rejecting a config is a health event, not a debug line" — contrato.
 _config_error: str | None = None
 
+# Push al backend: rechazos terminales (400/403) y descartes del spool de push.
+# Ninguno toca el registro (el blob); se publican porque un push rechazado
+# durante una semana que nadie ve es una falla silenciosa.
+_push_rejected_total = 0
+_push_dropped_total  = 0
+
+
+def count_push_rejected(n: int = 1) -> None:
+    global _push_rejected_total
+    with _lock:
+        _push_rejected_total += n
+
+
+def count_push_dropped(n: int = 1) -> None:
+    global _push_dropped_total
+    with _lock:
+        _push_dropped_total += n
+
 
 def set_config_error(reason: str | None) -> None:
     global _config_error
     with _lock:
         _config_error = reason
 
+
+# Registro de detectores: un detector pedido que no carga (falta librosa,
+# falta el modelo) es un evento de salud, no un log perdido (F-02, D-014).
+_registry_error: str | None = None
+
+
+def set_registry_error(reason: str | None) -> None:
+    global _registry_error
+    with _lock:
+        _registry_error = reason
+
 # Duty cycle: (monotonic, frames_entregados) en ventana móvil
 _frames_window: deque = deque()
 _capture_started_mono: float | None = None
 _frames_total = 0
+
+# Latidos de hilos para el watchdog (R-2.7): cada loop vigilado llama beat()
+# en CADA vuelta, también las vacías. Vida ≠ salud: esto prueba que el hilo
+# se agenda, no que el audio fluya (eso ya lo cubre el fail-loud).
+_beats: dict = {}
+
+
+def beat(name: str) -> None:
+    _beats[name] = time.monotonic()
+
+
+def stale_beats(max_age_s: float) -> list:
+    """Hilos vigilados cuyo último latido es más viejo que max_age_s."""
+    now = time.monotonic()
+    return sorted(n for n, t in _beats.items() if now - t > max_age_s)
 
 
 def count_clips_dropped(n: int = 1) -> None:
@@ -189,7 +233,7 @@ def audio_status_str() -> str:
 # ─── El bloque health de status.json ─────────────────────────────────────────
 
 def build_health() -> dict:
-    from . import storage  # noqa: PLC0415 — import tardío, evita ciclo
+    from . import push, storage  # noqa: PLC0415 — import tardío, evita ciclo
     audio_ok, peak_rms, _n = audio_health()
     det_ok = detector_ok()
     reasons = []
@@ -200,13 +244,20 @@ def build_health() -> dict:
                        f"{C.AUDIO_FLOOR_RMS}) — revisar hidrófono/cable")
     if not C.TWILIO_CONFIGURED:
         reasons.append("sin credenciales Twilio — ninguna alerta WhatsApp puede salir (modo banco)")
+    if push.auth_failed():
+        reasons.append("credencial del backend rechazada (401) — push de eventos detenido; "
+                       "el blob sigue escribiéndose")
     with _lock:
         if _config_error:
             reasons.append(f"config remota rechazada: {_config_error}")
+        if _registry_error:
+            reasons.append(_registry_error)
         clips_dropped  = _clips_dropped_total
         suppressed     = _suppressed_total
         events_dropped = _events_dropped_total
         overflows      = _capture_overflows
+        push_rejected  = _push_rejected_total
+        push_dropped   = _push_dropped_total
     return {
         "detector_ok":        det_ok,
         "audio_ok":           audio_ok,
@@ -217,6 +268,10 @@ def build_health() -> dict:
         "suppressed_count":   suppressed,
         "upload_backlog":     storage.event_spool_len(),
         "events_dropped":     events_dropped,
+        "push_enabled":       push.enabled(),
+        "push_backlog":       push.spool_len(),
+        "push_rejected":      push_rejected,
+        "push_dropped":       push_dropped,
         "wa_pending":         notify.pending_alert_count(),
         "archive_queue":      _archive_queue_len(),
         "degraded_reason":    "; ".join(reasons) if reasons else None,

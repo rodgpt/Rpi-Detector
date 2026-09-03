@@ -13,8 +13,8 @@ Last updated 2026-08-26 (**Event upload** added — dashboard D-022).
 **Implementation notes, normative for consumers:**
 
 - Event blob filenames are `{YYYY-MM-DDTHH-MM-SS}_{uuid4}.json` (capture time, dashes); clips are `{uuid4}.wav`. Both under date partitions derived from `captured_utc`.
-- The `health` block carries fields beyond the schema below: `deaf_seconds_total`, `suppressed_count`, `events_dropped`, `wa_pending`, `archive_queue`, `capture_overflows` (PortAudio overflows plus block-queue drops). Additive, same fail-loud spirit. A consumer must tolerate more health fields than it knows.
-- `score` for an RMS-decided event is the normalised RMS, already 0..1. The PSD detector's score is its tonal fraction. `detector_meta.decided_by` records `psd_tonal` | `rms` | `rms_fallback`.
+- The `health` block carries fields beyond the schema below: `deaf_seconds_total`, `suppressed_count`, `events_dropped`, `wa_pending`, `archive_queue`, `capture_overflows` (PortAudio overflows plus block-queue drops), and since the event push: `push_enabled`, `push_backlog`, `push_rejected`, `push_dropped`. Additive, same fail-loud spirit. A consumer must tolerate more health fields than it knows.
+- `score` for an RMS-decided event is the normalised RMS, already 0..1. The PSD detector's score is its tonal fraction; `ml_mfcc`'s is the model probability. `detector_meta.decided_by` records the registry member that decided (`psd_tonal` | `rms` | `ml_mfcc` | `rms_fallback`). Since the Phase 3 registry (2026-08-26), one clip can yield **multiple events** — one per detector that fired, distinct `event_id`s, same `captured_utc`; the first inside the cooldown window is the notified one. `event_type: "blast"` is now producible (the restored `ml_mfcc`), and `detection.thresholds` carries `ml_score_min` (device-local until the config contract learns it — see the `detectors` proposal in `docs/TODO.md`).
 - Suppressed events carry their would-be `clip.path` with `uploaded: false`. The audio is not kept (D-008).
 - `status.json → audio.device` describes the *selection rule*, `by-name:<hints>` or `synthetic:<pattern>`, never an ALSA index. Hardcoded indexes were the F-15 defect.
 - The device merges its own entry into `_sites.json` at startup. A rare read-modify-write, tolerable until the backend owns the registry.
@@ -433,7 +433,11 @@ The blob is normative because the device side is verified and shipping, and beca
 
 ## Event upload
 
-**Status: SPECIFIED, not yet built on either side.** Specified 2026-08-26 under dashboard D-022 and dashboard R-6.3.
+**Status: DEVICE SIDE BUILT 2026-08-26; backend endpoint pending.** Specified 2026-08-26 under dashboard D-022 and dashboard R-6.3.
+
+Device implementation: `oceankind/push.py`, wired into the transport worker after the blob write. Verified against a local fake backend enforcing this section (`raspberry-pi/tools/push_test.py`): byte-identical body, header set, idempotent re-post, the full status-code table including 401-stops-everything-and-surfaces-in-health, and the invariant — blob written regardless of push outcome, exercised through the real worker with the backend down. Disabled until `OCEANKIND_BACKEND_URL` + `OCEANKIND_DEVICE_KEY` are provisioned (URL without key refuses to start, R-8.1). Push failures land in a bounded spool (500, oldest dropped and counted — acceptable, the blob has the record) and `status.json → health` gains `push_enabled`, `push_backlog`, `push_rejected`, `push_dropped`.
+
+One device-side reading of the drain cadence, recorded so the backend side knows: the spool drains **whole** on each heartbeat, sequentially, still one event per request, stopping at the first retryable failure. "One at a time" here governs request granularity, not one-event-per-heartbeat — a week's outage should not take a week to catch up.
 
 The device POSTs each event to the backend as it happens, **in addition to** writing the event blob. Two paths, deliberately, and they are not alternatives:
 

@@ -21,10 +21,13 @@ from . import __version__
 from . import capture
 from . import config as C
 from . import health
+from . import detectors as registry
 from . import notify
 from . import pipeline as pl
+from . import push
 from . import storage
 from . import telemetry
+from . import watchdog
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -38,8 +41,8 @@ def build_status(session_start: datetime, alert_count: int, last_rms: float,
     consumidor usa, más la superficie de salud (R-2.x)."""
     now = datetime.now(timezone.utc)
     cfg = C.CONFIG.snapshot()
-    detectors = {"psd": ["psd_tonal"], "rms": ["rms"],
-                 "auto": ["psd_tonal", "rms"]}.get(cfg["detection_mode"], [])
+    # Lo que DE VERDAD está cargado y corriendo (R-2.6), no lo configurado.
+    detectors = registry.loaded_names(cfg)
     return {
         "schema_version":   C.SCHEMA_VERSION,
         "site":             C.SITE,
@@ -62,6 +65,7 @@ def build_status(session_start: datetime, alert_count: int, last_rms: float,
                 "psd_f_min":        cfg["psd_f_min"],
                 "psd_f_max":        cfg["psd_f_max"],
                 "window_hop_s":     cfg["window_hop_s"],
+                "ml_score_min":     C.ML_SCORE_MIN,   # device-local (ver TODO contrato)
             },
             "cooldown_s": cfg["cooldown_s"],
             "last_rms":   round(last_rms, 4),
@@ -134,6 +138,12 @@ def main() -> None:
     if not C.STORAGE_ENABLED:
         log.warning("Sin almacenamiento configurado (ni Azure ni OUTPUT_DIR) — "
                     "eventos solo en log y WhatsApp")
+    if push.enabled():
+        log.info("Push de eventos al backend: ACTIVO → %s (timeout %.0fs)",
+                 C.BACKEND_URL, C.BACKEND_TIMEOUT_S)
+    else:
+        log.info("Push de eventos al backend: deshabilitado (sin OCEANKIND_BACKEND_URL) — "
+                 "el índice del dashboard se actualiza solo por reconciliación")
 
     if C.STORAGE_ENABLED:
         storage.publish_site_registry()
@@ -154,6 +164,7 @@ def main() -> None:
 
     pipe.start()
     source.start()
+    watchdog.arm()
     notify.retry_pending_whatsapp()
 
     session_start = datetime.now(timezone.utc)
@@ -169,6 +180,7 @@ def main() -> None:
             if now - last_status >= hb:
                 health.maybe_alert_audio_health()   # R-2.2: hidrófono muerto suena
                 sensors = None
+                push.drain_push_spool()
                 if C.STORAGE_ENABLED:
                     storage.drain_event_spool()
                     try:
@@ -225,6 +237,7 @@ def main() -> None:
                                      "; ".join(changes) if changes else "sin cambios efectivos")
                 last_config = now
 
+            watchdog.tick()   # pingea a systemd SOLO si los hilos laten (R-2.7)
             stop.wait(timeout=1.0)
     finally:
         source.stop()

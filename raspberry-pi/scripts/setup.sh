@@ -64,6 +64,9 @@ pip3 install --break-system-packages -r "${REQ_FILE}"
 cp "${SRC_DIR}"/*.py "${OCEANKIND_DIR}/"
 rm -rf "${OCEANKIND_DIR}/oceankind"
 cp -R "${SRC_DIR}/oceankind" "${OCEANKIND_DIR}/oceankind"
+# ml_mfcc detector model (used only if that detector is enabled; see env file)
+[ -f "${SCRIPT_DIR}/../models/model.joblib" ] && \
+    cp "${SCRIPT_DIR}/../models/model.joblib" "${OCEANKIND_DIR}/model.joblib"
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${OCEANKIND_DIR}"
 echo "Production code copied to ${OCEANKIND_DIR}"
 
@@ -81,6 +84,11 @@ WorkingDirectory=${OCEANKIND_DIR}
 ExecStart=/usr/bin/python3 ${OCEANKIND_DIR}/marfutura_iot_audio.py
 Restart=always
 RestartSec=15
+# Watchdog (R-2.7): the service pings WATCHDOG=1 only while its worker threads
+# prove alive; a hung thread starves the ping and systemd restarts us. A hang
+# was previously invisible. NotifyAccess lets the main process send the pings.
+WatchdogSec=120
+NotifyAccess=main
 StandardOutput=journal
 StandardError=journal
 # All configuration and secrets come from here. The service REFUSES TO START
@@ -120,6 +128,12 @@ OCEANKIND_TWILIO_TOKEN=
 # Bench units without Twilio only: uncomment to allow starting without
 # credentials. The unit then CANNOT send any alert and says so in health.
 # OCEANKIND_ALLOW_NO_TWILIO=1
+
+# ── Dashboard backend: direct event push, in addition to the blob ──
+# Per-device key issued at registration; empty URL = push disabled (index
+# updates via reconcile only). URL without key = refuse to start.
+OCEANKIND_BACKEND_URL=
+OCEANKIND_DEVICE_KEY=
 
 # ── Azure (optional; without them the unit runs local-only) ──
 # Use the NEW v2 storage account/container, not the prototypes' blob (D-016).

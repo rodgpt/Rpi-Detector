@@ -19,9 +19,10 @@ from datetime import datetime, timezone
 
 from . import capture
 from . import config as C
-from . import detector
+from . import detectors as registry
 from . import health
 from . import notify
+from . import push
 from . import storage
 
 log = logging.getLogger("oceankind")
@@ -62,17 +63,18 @@ class Pipeline:
         self.stop_event.set()
         for t in self._threads:
             t.join(timeout=10)
-        # Trabajos que quedaron en la cola: preservar el EVENTO en el spool.
-        # El audio del clip se pierde (contado); el registro científico no.
+        # Trabajos que quedaron en la cola: preservar el EVENTO en ambos spools
+        # (blob y push). El audio del clip se pierde (contado); el registro no.
         drained = 0
         while True:
             try:
                 job = self.transport_queue.get_nowait()
             except queue.Empty:
                 break
+            event = self._build_job_event(job, clip_uploaded=False)
             if C.STORAGE_ENABLED:
-                event = self._build_job_event(job, clip_uploaded=False)
                 storage.spool_event(event, job["event_rel"])
+            push.spool_for_later(event)
             if job.get("clip") is not None:
                 health.count_clips_dropped()
             drained += 1
@@ -86,6 +88,7 @@ class Pipeline:
         log.info("Clasificador listo: ventanas de %.0f s, modo %s",
                  C.CAPTURE_SECONDS, C.CONFIG.snapshot()["detection_mode"].upper())
         while not self.stop_event.is_set():
+            health.beat("classify")     # latido para el watchdog (R-2.7), también en vueltas vacías
             clip = assembler.next_clip(timeout=1.0)
             if clip is None:
                 continue
@@ -102,32 +105,35 @@ class Pipeline:
         self.last_rms, self.last_peak_db = rms, peak_db
         health.record_rms(rms)
 
-        ml_result = {}
-        if cfg["detection_mode"] in ("psd", "auto"):
-            ml_result = detector.classify_samples(C.SAMPLE_RATE, clip, cfg)
-        d = detector.decide(rms, ml_result, cfg)
+        # La cadena ordenada de detectores (D-014): cada uno mira el mismo
+        # audio buscando su propia firma; lo que sale viene tipado.
+        detections = registry.run(C.SAMPLE_RATE, clip, cfg, rms)
 
-        tag = (f"  psd={ml_result.get('label','?')}({ml_result.get('proba',0):.2f})"
-               if ml_result else "")
-        flag = " *** ALERTA ***" if d["alert"] else ""
+        tag = ("  " + " ".join(f"{d['detector']}={d['label']}({d['score']:.2f})"
+                               for d in detections)) if detections else ""
+        flag = " *** ALERTA ***" if detections else ""
         log.info("[%s] RMS=%.4f  %.1f dB%s%s",
                  _level_bar(rms, cfg["alert_threshold"]), rms, peak_db, tag, flag)
 
-        if d["alert"]:
+        # Cada detección es SU PROPIO evento, etiquetado (R-3.3). El cooldown
+        # es global de notificaciones: la primera de la ventana notifica y
+        # lleva el audio; el resto se registra como suprimido (D-008).
+        for d in detections:
             now = time.time()
             notified = (now - self._last_alert) >= cfg["cooldown_s"]
             if notified:
                 self._last_alert = now
             else:
                 n = health.count_suppressed()
-                log.info("  detección en cooldown — registrada como suprimida (%d en la sesión)", n)
+                log.info("  detección %s en cooldown — registrada como suprimida (%d en la sesión)",
+                         d["detector"], n)
             self._enqueue_detection(clip if notified else None, captured_dt,
-                                    rms, peak_db, d, ml_result, suppressed=not notified)
+                                    rms, peak_db, d, suppressed=not notified)
 
         self._maybe_archive(clip, captured_dt)
 
-    def _enqueue_detection(self, clip, captured_dt, rms, peak_db, decision,
-                           ml_result, suppressed: bool) -> None:
+    def _enqueue_detection(self, clip, captured_dt, rms, peak_db, detection,
+                           suppressed: bool) -> None:
         """El cooldown limita NOTIFICACIONES; el registro es sagrado (R-4.2,
         D-008). Suprimida = evento sin audio y sin WhatsApp."""
         event_id = str(uuid.uuid4())
@@ -141,19 +147,19 @@ class Pipeline:
             "suppressed":   suppressed,
             "rms":          rms,
             "peak_db":      peak_db,
-            "decision":     decision,
-            "ml_result":    ml_result,
+            "detection":    detection,     # {type, score, label, meta, detector, decided_by}
         }
         try:
             self.transport_queue.put_nowait(job)
         except queue.Full:
-            # Política explícita: el evento va al spool YA (sin audio), el
-            # clip se descarta contado. Nunca se pierde el registro.
+            # Política explícita: el evento va a ambos spools YA (sin audio),
+            # el clip se descarta contado. Nunca se pierde el registro.
             log.error("cola de transporte llena — evento %s directo al spool, clip descartado",
                       event_id[:8])
+            event = self._build_job_event(job, clip_uploaded=False)
             if C.STORAGE_ENABLED:
-                storage.spool_event(self._build_job_event(job, clip_uploaded=False),
-                                    event_rel)
+                storage.spool_event(event, event_rel)
+            push.spool_for_later(event)
             if clip is not None:
                 health.count_clips_dropped()
 
@@ -181,18 +187,17 @@ class Pipeline:
     # ─── transporte ──────────────────────────────────────────────────────────
 
     def _build_job_event(self, job: dict, clip_uploaded: bool) -> dict:
-        d = job["decision"]
-        meta = {"decided_by": d["decided_by"],
-                **({k: job["ml_result"].get(k) for k in ("pred", "proba", "label")}
-                   if job["ml_result"] else {})}
+        d = job["detection"]
+        meta = {"decided_by": d["decided_by"], **(d.get("meta") or {})}
         return storage.build_event(
-            job["event_id"], job["captured_iso"], d["event_type"], d["detector"],
+            job["event_id"], job["captured_iso"], d["type"], d["detector"],
             d["score"], job["suppressed"], job["rms"], job["peak_db"],
             job["clip_rel"], clip_uploaded, meta)
 
     def _transport_loop(self) -> None:
         log.info("Transporte listo (cola máx %d)", C.TRANSPORT_QUEUE_MAX)
         while not self.stop_event.is_set():
+            health.beat("transport")    # latido para el watchdog (R-2.7)
             try:
                 job = self.transport_queue.get(timeout=1.0)
             except queue.Empty:
@@ -201,9 +206,10 @@ class Pipeline:
                 self._process_job(job)
             except Exception as exc:
                 log.error("error en transporte (evento %s): %s", job.get("event_id", "?")[:8], exc)
+                event = self._build_job_event(job, clip_uploaded=False)
                 if C.STORAGE_ENABLED:
-                    storage.spool_event(self._build_job_event(job, clip_uploaded=False),
-                                        job["event_rel"])
+                    storage.spool_event(event, job["event_rel"])
+                push.spool_for_later(event)
 
     def _process_job(self, job: dict) -> None:
         # Cuenta CADA detección (también suprimidas) para el clúster de voz.
@@ -220,15 +226,23 @@ class Pipeline:
                 log.info("  → %s", job["clip_rel"])
 
         # 2) Registrar SIEMPRE (R-4.1): un blob por evento; si falla, al spool.
+        #    El documento se construye UNA vez: el blob y el push llevan
+        #    exactamente los mismos bytes (contrato §Event upload).
+        event = self._build_job_event(job, clip_uploaded)
         if C.STORAGE_ENABLED:
-            storage.write_event(self._build_job_event(job, clip_uploaded), job["event_rel"])
+            storage.write_event(event, job["event_rel"])
+
+        # 2b) Push directo al backend — DESPUÉS e independiente del blob. Su
+        #     resultado no puede tocar nada: solo compra latencia del índice.
+        push.push_event(event)
 
         # 3) Notificar DESPUÉS del upload, solo detecciones no suprimidas.
         if not job["suppressed"]:
-            d = job["decision"]
+            d = job["detection"]
             notify.send_whatsapp(job["rms"], job["peak_db"],
                                  job["clip_rel"] if clip_uploaded else None,
-                                 ml_result=job["ml_result"] or None, label=d["label"])
+                                 ml_result={"proba": d["score"], "label": d["label"]},
+                                 label=d["label"])
             self.alert_count += 1
             if self.iot_client:
                 try:

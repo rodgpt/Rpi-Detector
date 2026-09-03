@@ -176,6 +176,15 @@ PSD_SEARCH_HZ  = float(os.environ.get("OCEANKIND_PSD_SEARCH_HZ", "15"))
 
 DETECTOR_FAIL_LIMIT = int(os.environ.get("OCEANKIND_DETECTOR_FAIL_LIMIT", "3"))
 
+# ── Detector ml_mfcc (registro D-014, opcional) ──────────────────────────────
+# Umbral del segundo detector. DEVICE-LOCAL por ahora: el documento de config
+# firmado no lo conoce y rechaza claves desconocidas — agregarlo es un cambio
+# de contrato pendiente de convergencia con el backend (ver docs/TODO.md).
+ML_MODEL_PATH = os.environ.get("OCEANKIND_ML_MODEL_PATH",
+                               str(Path.home() / "oceankind" / "model.joblib"))
+ML_SCORE_MIN  = float(os.environ.get("OCEANKIND_ML_SCORE_MIN", "0.60"))
+ML_LABEL      = os.environ.get("OCEANKIND_ML_LABEL", "IMPULSO")
+
 # ── Cadencias y rutas ────────────────────────────────────────────────────────
 WHATSAPP_HEARTBEAT_INTERVAL = float(os.environ.get("OCEANKIND_WA_HEARTBEAT_S", "43200"))
 CONFIG_CHECK_INTERVAL       = float(os.environ.get("OCEANKIND_CONFIG_CHECK_S", "300"))
@@ -206,12 +215,29 @@ ARCHIVE_MAX_FILES = int(os.environ.get("OCEANKIND_ARCHIVE_MAX_FILES", "300"))
 EVENT_SPOOL_DIR = Path(os.environ.get("OCEANKIND_EVENT_SPOOL_DIR", str(STATE_DIR / "event_spool")))
 EVENT_SPOOL_MAX = int(os.environ.get("OCEANKIND_EVENT_SPOOL_MAX", "500"))
 
+# ── Push directo al backend del dashboard (contrato §Event upload) ───────────
+# Segundo camino por evento, ADEMÁS del blob (jamás en vez de). Vacío = sin
+# push: el índice del dashboard se entera solo por su pase de reconciliación.
+BACKEND_URL       = os.environ.get("OCEANKIND_BACKEND_URL", "").strip()
+# Clave por dispositivo, emitida por el backend al registrar la unidad
+# (Dashboard D-017). Secreto: sin default literal, obligatoria con BACKEND_URL.
+DEVICE_KEY        = os.environ.get("OCEANKIND_DEVICE_KEY", "")
+BACKEND_TIMEOUT_S = float(os.environ.get("OCEANKIND_BACKEND_TIMEOUT_S", "10"))
+PUSH_SPOOL_DIR    = Path(os.environ.get("OCEANKIND_PUSH_SPOOL_DIR", str(STATE_DIR / "push_spool")))
+PUSH_SPOOL_MAX    = int(os.environ.get("OCEANKIND_PUSH_SPOOL_MAX", "500"))
+
 # Colas acotadas (R-1.3). Dimensionadas para 512 MB: un clip estéreo int16 de
 # 5 s son ~960 KB.
 BLOCK_QUEUE_MAX     = int(os.environ.get("OCEANKIND_BLOCK_QUEUE_MAX", "200"))   # ~20 s de audio
 TRANSPORT_QUEUE_MAX = int(os.environ.get("OCEANKIND_TRANSPORT_QUEUE_MAX", "16"))
 
 VEDIRECT_PORT = os.environ.get("OCEANKIND_VEDIRECT_PORT", "")
+
+# Watchdog (R-2.7): cadencia del ping WATCHDOG=1 y máxima edad tolerada del
+# latido de cada hilo vigilado. WatchdogSec de la unidad systemd (120 s) debe
+# ser cómodamente mayor que ambos.
+WATCHDOG_PING_S     = float(os.environ.get("OCEANKIND_WATCHDOG_PING_S", "20"))
+WATCHDOG_BEAT_MAX_S = float(os.environ.get("OCEANKIND_WATCHDOG_BEAT_MAX_S", "60"))
 
 # Umbrales batería
 BATTERY_WARNING_V       = float(os.environ.get("OCEANKIND_BATT_WARNING_V",  "11.8"))
@@ -382,6 +408,11 @@ def validate_startup_config() -> None:
         problems.append(f"OCEANKIND_DETECTION_MODE={DETECTION_MODE!r} inválido (psd|rms|auto)")
     if AUDIO_SOURCE != "device" and not AUDIO_SOURCE.startswith("synthetic"):
         problems.append(f"OCEANKIND_AUDIO_SOURCE={AUDIO_SOURCE!r} inválido (device|synthetic:<patrón>)")
+    if BACKEND_URL and not DEVICE_KEY:
+        problems.append("OCEANKIND_BACKEND_URL definida pero falta OCEANKIND_DEVICE_KEY — "
+                        "la clave por dispositivo la emite el backend al registrar la unidad.")
+    if BACKEND_URL and not BACKEND_URL.startswith(("http://", "https://")):
+        problems.append(f"OCEANKIND_BACKEND_URL={BACKEND_URL!r} debe empezar con http:// o https://")
     if STORAGE_ENABLED:
         if not SITE:
             problems.append("OCEANKIND_SITE falta. En el contrato v2 todo vive bajo "

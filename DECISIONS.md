@@ -266,7 +266,9 @@ The dashboard's remaining outward references become GitHub URLs rather than rela
 
 ## D-014 — Detector registry, not a selector
 
-**Status:** DECIDED, 2026-08-08. **Client confirmed 2026-08-12:** the PSD detector stays, and a second model is expected soon — build for two detectors. Phase 1 already stamps `detector` and `event_type` on every manifest entry and made `DETECTION_MODE` honest (`psd`/`rms`/`auto`) as an interim; the ordered registry replaces that selector in Phase 3.
+**Status:** DECIDED, 2026-08-08. **IMPLEMENTED 2026-08-26** (`oceankind/detectors/`, verified by `tools/registry_test.py`): ordered chain via `OCEANKIND_DETECTORS`, one typed event per detection, `psd_tonal` + `rms` + the restored `ml_mfcc`, plugin registration for the client's next model, unloadable-detector-is-a-health-event. One deviation from the original proposal, forced by a newer decision: the signed remote-config contract (converged 2026-08-22) carries `detection_mode` and rejects unknown keys, so `DETECTION_MODE` was **not** deleted — it remains the remote-tunable surface, mapped onto registry compositions, while the explicit detector list is device-local env until a `detectors` key is added to the config contract with backend convergence (proposed in `docs/TODO.md`).
+
+**Client confirmed 2026-08-12:** the PSD detector stays, and a second model is expected soon — the registry is its slot.
 
 **Context.** F-21: the device detector was replaced with a PSD tonal-peak algorithm that cannot fire on a sub-second broadband event, while every project document describes a blast detector. The client is unavailable to resolve it and work should not stop.
 

@@ -46,7 +46,7 @@ power on → kernel → systemd → oceankind.service → marfutura_iot_audio.py
 
 Shutdown (SIGTERM/SIGINT) is ordered: source stops, workers join, undelivered transport jobs are preserved as spooled events — the record survives a restart; only un-uploaded clip audio is lost, counted.
 
-No watchdog yet: a process that hangs rather than crashes is still invisible (R-2.7, Phase 5). The superseded monoliths are preserved in `legacy/superseded-monolith/`.
+A hang is no longer invisible (R-2.7, 2026-08-26): under systemd, `watchdog.py` pings `WATCHDOG=1` only while the classify and transport threads prove alive (a heartbeat per loop iteration, empty ones included); a hung thread starves the ping and `WatchdogSec=120` restarts the service. Outside systemd (bench runs by hand) the watchdog is a no-op. The superseded monoliths are preserved in `legacy/superseded-monolith/`.
 
 ---
 
@@ -57,8 +57,8 @@ No watchdog yet: a process that hangs rather than crashes is still invisible (R-
 | Thread | Owns | Touches | Never does |
 |---|---|---|---|
 | capture (`capture.py`) | PortAudio stream, block queue | Audio hardware | Network, disk, heavy CPU |
-| classify (`pipeline.py`) | Window assembly (5 s, optionally overlapped via `window_hop_s`), detector, alert decision, archive sampling | CPU, small local writes | Network |
-| transport (`pipeline.py`) | Blob uploads, WhatsApp, IoT, cluster call | Network | Blocks anything upstream |
+| classify (`pipeline.py`) | Window assembly (5 s, optionally overlapped via `window_hop_s`), the ordered detector registry (`detectors/`, D-014), alert decision, archive sampling | CPU, small local writes | Network |
+| transport (`pipeline.py`) | Blob uploads, direct event push to the backend (`push.py`), WhatsApp, IoT, cluster call | Network | Blocks anything upstream |
 | housekeeping (main thread) | status.json, VE.Direct serial, modem HTTP, `/proc`, config poll, retries | Serial, network, sysfs | Touches the audio device |
 
 One deliberate deviation from the original five-thread design: telemetry and the config poller are folded into the housekeeping main thread. They are all timer-driven, none touches the audio path, and fewer threads is cheaper on the 512 MB bench unit. The isolation guarantee that matters — nothing between two audio blocks — is unchanged.
@@ -71,7 +71,7 @@ Shared state and its protection:
 | Transport queue | classify W, transport R | Bounded; full → event straight to disk spool, clip audio dropped and counted |
 | Tunables (`config.CONFIG`) | housekeeping W, all R | `threading.Lock`, snapshot per clip |
 | Health counters (`health.py`) | all W, housekeeping R | Single module lock |
-| Event spool / WA retry files | transport + housekeeping | Idempotent file ops, bounded |
+| Event spool / push spool / WA retry files | transport + housekeeping | Idempotent file ops, bounded. Blob-spool drops are a real loss (counted, near-sacred); push-spool drops are tolerable — the blob holds the record |
 | Battery alert state | housekeeping only | Owned solely by housekeeping |
 
 **Queues are bounded, always**, each with an explicit drop policy and a published counter (`health.clips_dropped`, `health.capture_overflows`, `health.events_dropped`). An event is never dropped: when a queue overflows, the event JSON goes to the disk spool and only clip audio is sacrificed, counted. A system that reports what it dropped is honest.
@@ -140,7 +140,7 @@ Status after Phase 1 (2026-08-12):
 |---|---|---|
 | Classifier fails (F-02) | **Fixed:** counted, alarmed, `detector_ok: false`; RMS fallback in `auto` mode; retried every clip | — |
 | Capture device vanishes | Warn and retry the same dead index (F-15); `audio_ok: false` + alarm after the health window | Re-detect by name (Phase 2) |
-| Process hangs without crashing | Nothing notices | Watchdog (Phase 5) |
+| Process hangs without crashing | **Fixed 2026-08-26 (R-2.7):** systemd `WatchdogSec=120` + pings gated on thread heartbeats — a hung main/classify/transport thread starves the ping and systemd restarts the service. Deliberate boundary: degraded-but-running states (dead hydrophone, network down) do NOT restart — they fail loud instead; a restart loop would mask them. A stalled capture *callback* reaches the fail-loud path (duty/audio_ok), not the watchdog | — |
 | Upload fails after notify (F-13) | **Fixed:** upload first, `clip_uploaded` recorded truthfully, no dead links | — |
 | Bad update | Node unreachable (F-06) | A/B, health check, auto-revert (Phase 5) |
 | Archive queue backs up | **Fixed:** bounded at 300, drops counted in `health.clips_dropped` | Capture/transport queues arrive with Phase 2 |

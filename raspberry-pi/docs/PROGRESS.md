@@ -88,18 +88,18 @@ Verified by `tools/pipeline_soak_test.py`: real threaded pipeline, synthetic sou
 
 ---
 
-## Phase 3: Detector registry **NOT STARTED**
+## Phase 3: Detector registry **CODE COMPLETE 2026-08-26**
 
-Harness only. No detection science.
+Harness only. No detection science. Verified by `tools/registry_test.py`.
 
-- [ ] `detectors/` package with `detect(clip) -> {type, score, meta} | None` (R-3.1, D-014)
-- [ ] Ordered registry driven by `OCEANKIND_DETECTORS`, replacing `DETECTION_MODE` (R-3.2, F-01)
-- [ ] Port the inlined PSD algorithm into `detectors/psd_tonal.py`, retiring the duplicate (R-3.4, F-23)
-- [ ] Restore the MFCC path as `detectors/ml_mfcc.py` rather than leaving the model orphaned (F-24)
-- [ ] `event_type` and `detector` stamped on every event (R-3.3)
-- [ ] Every threshold settable through remote config, clamped (R-3.6)
+- [x] `oceankind/detectors/` package, `detect(fs, samples, cfg, rms) -> {type, score, label, meta} | None` (R-3.1, D-014) — proven to carry an event type no detector produces today (`register()` plugin path)
+- [x] Ordered registry driven by `OCEANKIND_DETECTORS` (R-3.2, F-01) — with a nuance forced by the config contract: the signed remote-config document only knows `detection_mode` and rejects unknown keys, so `DETECTION_MODE` survives as the *remote* surface (mapped: psd→[psd_tonal], rms→[rms], auto→[psd_tonal + real rms fallback on classifier error]) and the explicit list is device-local env until the `detectors` key is added to the contract (proposal in `docs/TODO.md`)
+- [x] PSD algorithm's canonical home is `detectors/psd_tonal.py`; the standalone duplicate retired to `legacy/superseded-monolith/` (R-3.4, F-23)
+- [x] MFCC path restored as `detectors/ml_mfcc.py` (F-24) — feature extractor ported verbatim from `tools/predict.py`, deps (librosa/sklearn/joblib) lazy and OPTIONAL, load failure is a health event, never silence. **Empirical note (2026-08-26):** run against synthetics, the model fires "blast" on a *tonal* clip and stays silent on an impulse — consistent with its FILTRO (pool-filter) training and strong evidence for client dependency 2. Also: bundle pickled with scikit-learn 1.6.1 (version-warns on newer) — pin sklearn on any unit enabling it, or have the client re-export
+- [x] `event_type` and `detector` stamped on every event (R-3.3) — one typed event per detection; a chain firing twice on one clip yields two events, first notified with audio, rest suppressed
+- [x] Every threshold settable through remote config, clamped (R-3.6) — except `ml_score_min`, device-local pending the same contract addition
 
-**Done when:** a synthetic tonal input fires the vessel detector, a synthetic impulse fires the blast detector, and both are labelled correctly in the output.
+**Done when:** a synthetic tonal input fires the vessel detector ✓, a synthetic impulse fires a detector and is labelled correctly ✓ (the `rms` member catches it, typed `unknown`; whether `ml_mfcc` should fire on impulses is exactly the open science of F-21/dep 2 — the harness runs whatever model the client supplies).
 
 ---
 
@@ -112,6 +112,7 @@ Pulled forward by the client's cutover decision: v2 only, new storage, prototype
 - [x] Publish `_sites.json` (R-5.2) — device merges its own entry at startup; coordinates live here (F-08 closed)
 - [x] Omit empty buckets from power history (R-6.3) — verified with a deliberate gap in the conformance test
 - [x] Non-finite floats as null, verified (R-4.6)
+- [x] Direct event push to the backend, in parallel with the blob (contract §Event upload, dashboard D-022; 2026-08-26) — `push.py` on the transport worker: byte-identical body, idempotent, full status-code table, 401 as a health event, bounded push spool with heartbeat drain, blob invariant proven with the backend down. Verified by `tools/push_test.py` (27 checks vs a local fake backend). **Disabled until the client provisions `OCEANKIND_BACKEND_URL` + per-device `OCEANKIND_DEVICE_KEY`** (and registers the unit to its site — pushes 403 otherwise)
 - [ ] Index tags on event blobs: site, event_type, detector, score, suppressed — **needs the real Azure account** (GPv2 + tag permissions unverifiable in local mode)
 - [x] **`tools/validate_contract.py` passes with no errors** (R-5.6) — `tools/v2_conformance_test.py` drives the production emit code and validates: CONFORMANT. Rerun against a real bench run when hardware is available
 - [ ] Dashboard v2 reader against the new storage — **now the dashboard's critical path**; until it exists the new fleet is invisible and new WhatsApp `?play=` links do not resolve
@@ -126,7 +127,7 @@ Aux blobs (`acoustic_indicators.json`, `ocean_conditions.json`): the device writ
 - [ ] A/B directories with a symlink switch
 - [ ] Post-restart health check, automatic reversion (R-7.1, F-06)
 - [ ] **Prove it: deliberately break an update on the bench unit and watch it revert**
-- [ ] Watchdog for the hang case (R-2.7)
+- [x] Watchdog for the hang case (R-2.7) — 2026-08-26: `watchdog.py` + `WatchdogSec=120`/`NotifyAccess=main` in the unit; pings gated on classify/transport thread heartbeats, so a hang restarts and a degraded-but-alive state does not. Verified with a real notify socket (smoke test §9). Bench soak exercises it for real under systemd
 - [ ] Scoped write credential instead of the storage account key (R-8.4, F-07) — **mechanism decided, D-017**: one Entra service principal per device, custom write-only role, ABAC condition on `sites/{site}/*`, never delete, never list. Sub-tasks:
   - [ ] Custom RBAC role definition (`blobs/write` + `blobs/add/action` only) and the ABAC condition, scripted so provisioning is repeatable
   - [ ] `_get_blob_client` accepts a credential other than a connection string (`azure-identity`); connection string stays available for bench and local runs

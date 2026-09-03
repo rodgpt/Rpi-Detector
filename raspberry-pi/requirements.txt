@@ -4,7 +4,12 @@
 # librosa, scikit-learn and joblib — do NOT install those on the device;
 # they are workstation-only and heavy for a 512 MB bench unit.
 #
-# zoneinfo, wave, csv, urllib are stdlib. arecord comes from alsa-utils (apt).
+# zoneinfo, wave, csv, urllib are stdlib.
+#
+# OPTIONAL — only on units that enable the ml_mfcc detector (OCEANKIND_DETECTORS):
+#   librosa scikit-learn~=1.6 joblib
+# Heavy on 512 MB (librosa pulls numba); measure resident memory first (R-9.5).
+# sklearn pinned ~=1.6 because model.joblib was pickled with 1.6.1.
 
 numpy>=1.24
 scipy>=1.10           # Welch PSD + find_peaks (detector psd_tonal)

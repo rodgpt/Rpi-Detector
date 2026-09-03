@@ -12,6 +12,8 @@ Categories: `[Contract]` `[Sec]` `[Ops]` `[Client]` `[Docs]` `[Data]`
 
 ### Blocking, send today
 
+- [ ] **[Ops] Enable the event push (client)** — device side built and tested 2026-08-26 (contract §Event upload), disabled until three things from the client side land: the backend base URL, a per-device API key for each unit (backend registration flow, Dashboard D-017), and the unit registered to its site (mismatch = 403). Two env lines per unit once available: `OCEANKIND_BACKEND_URL`, `OCEANKIND_DEVICE_KEY`.
+
 - [ ] **[Ops] Azure access request** — Contributor on the resource group plus Storage Blob Data Owner, or Owner. Phase 4 is 24 to 28 hours of the engagement and none of it can start without this. Put in writing that the delivery date moves with the grant date.
 
 - [ ] **[Sec] Twilio console access, then rotate** — The token is exposed in `legacy/build-artifacts/` twice and on a git remote (it is out of `raspberry-pi/src/` since Phase 1). *Client decision 2026-08-13: keep using the exposed token until console access arrives.* It lives in the gitignored `raspberry-pi/oceankind.env`, flagged for rotation in the file itself. On rotation: replace both values there, redeploy the env file, delete `legacy/build-artifacts/`. Still the single most urgent action in the project.
@@ -26,7 +28,11 @@ Categories: `[Contract]` `[Sec]` `[Ops]` `[Client]` `[Docs]` `[Data]`
 
 - [ ] **[Ops] Revoke-on-theft is a runbook item, not just a permission** — D-017 makes a stolen unit a 30-second revoke, but only if someone notices and knows the procedure. The signal is a heartbeat gap. Needs: what to watch, who can revoke, and the explicit accepted risk that a revoked-but-standing unit loses its `remote_config.json` channel and waits for a site visit. Goes in `docs/RUNBOOK.md` when D-002 unblocks it.
 
+- [ ] **[Contract] Propose `detectors` + `ml_score_min` for the signed config document** — the registry (D-014, built 2026-08-26) is remotely steerable only through `detection_mode` because the config contract rejects unknown keys by design. Adding an ordered `detectors` list and the ml threshold needs the usual both-sides convergence (schema, clamps/validation, backend UI). Until then `OCEANKIND_DETECTORS` / `OCEANKIND_ML_SCORE_MIN` are per-unit env.
+
 ### Client-facing
+
+- [ ] **[Client] model.joblib behaves as a tonal detector, with evidence** — harness run 2026-08-26: fires "blast" on a sustained tonal synthetic, silent on a sub-second impulse. Consistent with FILTRO training. Send with dependencies 2/3: until retrained on real blasts, enabling `ml_mfcc` adds a second machinery detector, not an impulse detector.
 
 - [ ] **[Client] Correct the write-SAS claim in `SYSTEM_REVIEW.md`** — §4.3 says the dashboard stores a write-capable SAS in `localStorage`. It does not; the constant is dead. See X-01. Correct it before the client's side finds it, because one falsified claim discounts the twelve that are true.
 

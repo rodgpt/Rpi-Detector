@@ -94,7 +94,7 @@ entirely on your account state:
 | Account state | What happens |
 |---|---|
 | Trial credit still live (first 30 days, USD 200) | Writes bill against credit. A soak costs a small fraction of it. **No interruption** — this is the good case |
-| Credit expired, spending limit **on** | Subscription is **disabled** on exceeding free limits. Uploads start failing. Today that is a `log.warning` in `storage.py:70-72` plus the spool — not an alarm |
+| Credit expired, spending limit **on** | Subscription is **disabled** on exceeding free limits. Uploads start failing. Today that is a `log.warning` in `storage.py` plus the spool — not an alarm |
 | Credit expired, spending limit **off** | Writes bill to your card. Small, but confirm the figure yourself on the [pricing calculator](https://azure.microsoft.com/pricing/calculator/) — the pricing page renders its numbers client-side and cannot be quoted reliably second-hand |
 
 **Pick one, deliberately:**
@@ -137,10 +137,10 @@ card — those are different risks and only blanking solves the second.
 
 | Variable | State in the repo copy | For the bench |
 |---|---|---|
-| `OCEANKIND_SITE` | empty | Set to `banco` in §4. Empty is fine until storage is on — `config.py:385` only demands it then |
+| `OCEANKIND_SITE` | empty | Set to `banco` in §4. Empty is fine until storage is on — `config.py` (validate_startup_config) only demands it then |
 | `OCEANKIND_OUTPUT_DIR` | commented out | **Must be set** in §4, or the device writes nothing at all |
 | `OCEANKIND_AUDIO_SOURCE` | commented out | Defaults to `device`. No hydrophone here, so §4's `synthetic:tone` is required |
-| `OCEANKIND_CONFIG_HMAC_KEY` | empty | **Correct as-is.** No key means remote config is refused entirely (F-10, by design). `main.py:210-215` catches it, records a health event, and does not crash |
+| `OCEANKIND_CONFIG_HMAC_KEY` | empty | **Correct as-is.** No key means remote config is refused entirely (F-10, by design). `main.py` (the config poller) catches it, records a health event, and does not crash |
 | `OCEANKIND_STORAGE_CONNECTION_STRING` | empty | Leave empty for the 24 h soak. §8 fills it for the short second run |
 
 Set all of these on the Pi in `/etc/oceankind.env` (§4), not in the repo copy —
@@ -258,7 +258,7 @@ sudo systemctl restart oceankind
 journalctl -u oceankind -f     # watch for ~2 min
 ```
 
-You should see: the startup banner, `Fuente sintética iniciada`,
+You should see: the startup banner (including `Push de eventos al backend: deshabilitado` — expected, no backend URL is set), `Fuente sintética iniciada`,
 `Captura continua iniciada`… then every ~5 s a level bar with
 `psd=MOTOR(1.00) *** ALERTA ***`, one WhatsApp-suppressed log line per window,
 and `→ evento registrado … [suprimido]`. After ~60 s, `→ status.json …`.
@@ -327,7 +327,7 @@ uptime                                                 # load averages
 **Upload health over the 24 h** — new to the Azure run, check it explicitly:
 
 ```bash
-python3 -m json.tool ./out/sites/banco/status.json | grep -iE "spool|dropped|degraded"
+python3 -m json.tool ./out/sites/banco/status.json | grep -iE "backlog|dropped|degraded"
 journalctl -u oceankind --since "24 hours ago" | grep -c "Error subiendo"
 ```
 
@@ -417,7 +417,7 @@ proves `publish_site_registry()` worked.
   operation with a control-plane role. Use `--account-key "$KEY"` as every
   command in this file does, not `--auth-mode login`.
 - **Events stop partway through the soak** — check the spool
-  (`health.event_spool_len` in `status.json`). If it is at `EVENT_SPOOL_MAX`
+  (`health.upload_backlog` in `status.json`). If it is at `EVENT_SPOOL_MAX`
   (500) the oldest events were discarded and `events_dropped` is non-zero, which
   invalidates the run's "events are sacred" check. Most likely cause is the
   subscription disabling on quota (§0.1) or the Wi-Fi dropping.
@@ -428,6 +428,10 @@ proves `publish_site_registry()` worked.
 - **pip is slow on scipy/numpy** — normal on first install (aarch64 wheels are
   ~40 MB); on a 32-bit image they come prebuilt from piwheels instead. If it
   says "Building wheel", that is the failure case — Ctrl-C, see §3.
+- **`uptime_seconds` much smaller than expected at the end** — the service
+  restarted mid-soak. Check `journalctl -u oceankind | grep -i watchdog`: since
+  2026-08-26 a hung thread makes systemd restart the service (WatchdogSec=120).
+  A watchdog restart during the soak is a FINDING — record it, keep the journal.
 - **You rebooted mid-soak** — duty cycle and counters are per-session; the
   24 h clock restarts. (The output tree survives — it is on the SD, not tmpfs.)
 - **Remote config never applies** — expected. `OCEANKIND_CONFIG_HMAC_KEY` is

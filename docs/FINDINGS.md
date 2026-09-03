@@ -40,8 +40,8 @@ Paths are post-restructure. Last verified: 2 August 2026.
 | F-20 | LOW | Modem admin API queried without authentication | Reports, confirmed | Deferred |
 | **F-21** | **CRITICAL** | **Detector replaced. Arithmetically cannot fire on a sub-second event** — direction confirmed 2026-08-12: keep PSD, second detector coming (D-014) | **New** | **0** |
 | F-22 | HIGH | Archive queue cap exceeds the RAM it lives in — **FIXED 2026-08-12** | New | 1 |
-| F-23 | MEDIUM | PSD algorithm duplicated: inlined in monolith and in detector_psd.py | New | 1 |
-| F-24 | MEDIUM | model.joblib is dead weight; loader is a stub — **naming/stub FIXED 2026-08-12; model restored as detector in Phase 3** | New | 1 |
+| F-23 | MEDIUM | PSD algorithm duplicated — **FIXED 2026-08-26**: canonical in `detectors/psd_tonal.py`, duplicate retired to legacy | New | 1 |
+| F-24 | MEDIUM | model.joblib is dead weight — **FULLY CLOSED 2026-08-26**: restored as the `ml_mfcc` registry detector | New | 1 |
 | X-01 | — | Report claim that did not survive verification | Correction | Now |
 
 ---
@@ -433,3 +433,17 @@ The monolith became the `oceankind/` package: capture / classify / transport thr
 **F-19 — improved.** Battery dedup state moved to `STATE_DIR`: survives service restarts (the original complaint's practical case). True reboot persistence is physically impossible under the whole-root overlay and lands with D-002.
 
 **R-5.5 — closed.** Every network call now carries an explicit timeout: Twilio via `TwilioHttpClient(timeout=15)` (verified against the installed SDK signature), Azure client connection/read timeouts, modem HTTP 3 s, VE.Direct serial 1 s.
+
+---
+
+## Phase 3 fixes (2026-08-26) — detector registry
+
+D-014 implemented: `oceankind/detectors/` runs an ordered chain, each detection becomes its own typed event. Verified by `tools/registry_test.py`.
+
+**F-23 — fixed.** One copy of the PSD algorithm exists, in `detectors/psd_tonal.py`, and it is the one that runs. The unimported third-party original moved to `legacy/superseded-monolith/detector_psd_original-integral.py` as reference.
+
+**F-24 — fully closed.** `model.joblib` is live again as `detectors/ml_mfcc.py` (event_type `blast`), with the feature extractor ported verbatim from `tools/predict.py` — the model was trained on those exact librosa features, so no reimplementation. Its heavy deps are optional and lazy; a requested-but-unloadable detector reaches `health.degraded_reason` (F-02 class, never silent).
+
+**New empirical evidence for F-21 / client dependency 2 (2026-08-26).** Run against synthetics through the harness, `model.joblib` **fires "blast" on a sustained tonal clip and does not fire on a sub-second impulse** — precisely the behaviour of a model trained on a humming pool filter (`FILTRO`). Until the client retrains on real blasts, the fleet effectively carries two tonal-machinery detectors and no impulse detector beyond the RMS level gate. Raise with the client alongside dependency 3 (labelled audio).
+
+**Operational note.** The bundle was pickled with scikit-learn 1.6.1; newer sklearn loads it with an `InconsistentVersionWarning`. Any unit enabling `ml_mfcc` should pin sklearn ~1.6, or the client re-exports the bundle with the deployed version.

@@ -100,16 +100,37 @@ print("5. non-finite floats (R-4.6)")
 s = storage.sanitize_for_json({"a": float("inf"), "b": [float("nan"), 1.5], "c": {"d": float("-inf")}})
 check("inf/nan -> None", s == {"a": None, "b": [None, 1.5], "c": {"d": None}})
 
-print("6. decide(): every mode can fire (F-01)")
-cfg = C.CONFIG.snapshot()
-d_psd = detector.decide(0.05, {"proba": 1.0, "label": "MOTOR", "pred": 1}, cfg)
-check("psd fires on tonal", d_psd["alert"] and d_psd["decided_by"] == "psd_tonal")
-d_fb = detector.decide(0.5, {}, cfg)   # clasificador caído en auto/psd
-if C.DETECTION_MODE == "psd":
-    check("psd without classifier stays honest (no fallback, alarmed elsewhere)",
-          d_psd["detector"] == "psd_tonal")
-check("rms path fires on loud input", detector.decide(0.5, {}, cfg)["alert"] or C.DETECTION_MODE == "psd",
-      f"(mode={C.DETECTION_MODE}, decided_by={d_fb['decided_by']})")
+print("6. registry: every mode can genuinely fire (F-01, D-014)")
+from oceankind import detectors as registry  # noqa: E402
+from oceankind.detectors import psd_tonal as _pt  # noqa: E402
+
+
+def _stereo(mono):
+    pcm = (np.clip(mono, -1, 1) * 32000).astype(np.int16)
+    return np.column_stack([pcm, pcm])
+
+
+cfg = dict(C.CONFIG.snapshot())
+tonal_clip, impulse_clip = _stereo(tonal), _stereo(impulse)
+
+cfg["detection_mode"] = "psd"
+dets = registry.run(48000, tonal_clip, cfg, rms=0.2)
+check("psd mode fires vessel on tonal", len(dets) == 1 and dets[0]["type"] == "vessel"
+      and dets[0]["decided_by"] == "psd_tonal", f"({dets})")
+
+cfg["detection_mode"] = "rms"
+dets = registry.run(48000, impulse_clip, cfg, rms=0.2)
+check("rms mode fires on loud input", len(dets) == 1 and dets[0]["type"] == "unknown"
+      and dets[0]["score"] == 0.2)
+
+cfg["detection_mode"] = "auto"
+_orig_analyze = _pt.analyze
+_pt.analyze = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("clasificador roto"))
+dets = registry.run(48000, impulse_clip, cfg, rms=0.2)
+_pt.analyze = _orig_analyze
+check("auto falls back to REAL rms when classifier dies",
+      len(dets) == 1 and dets[0]["decided_by"] == "rms_fallback")
+health.record_classify_result(True)   # limpiar el contador para lo que sigue
 
 print("7. overlapping windows (window_hop_s)")
 import queue as _queue  # noqa: E402
@@ -196,7 +217,47 @@ check("apply: mode switches, out-of-range clamped to 0.95",
 C.CONFIG.apply({"detection_mode": "psd", "score_min": 0.6})
 C.CONFIG_HMAC_KEY = ""
 
-print("9. startup validation")
+print("9. watchdog: pings while threads beat, starves when one hangs (R-2.7)")
+import socket as _socket  # noqa: E402
+import time as _t2  # noqa: E402
+from oceankind import watchdog as _wd  # noqa: E402
+
+_sock_path = os.path.join(tempfile.mkdtemp(), "n.sock")
+_rx = _socket.socket(_socket.AF_UNIX, _socket.SOCK_DGRAM)
+_rx.bind(_sock_path)
+_rx.settimeout(0.5)
+os.environ["NOTIFY_SOCKET"] = _sock_path
+check("arms with NOTIFY_SOCKET", _wd.arm() is True)
+
+C.WATCHDOG_PING_S = 0.0            # pingear en cada tick para el test
+health.beat("classify")
+health.beat("transport")
+_wd.tick()
+try:
+    check("ping WATCHDOG=1 sent while threads beat", _rx.recv(64) == b"WATCHDOG=1")
+except TimeoutError:
+    check("ping WATCHDOG=1 sent while threads beat", False, "(timeout)")
+
+health._beats["classify"] = _t2.monotonic() - 9999   # hilo "colgado"
+_wd._last_ping = 0.0
+_wd.tick()
+try:
+    _rx.recv(64)
+    check("ping WITHHELD when a thread hangs", False)
+except TimeoutError:
+    check("ping WITHHELD when a thread hangs", True)
+
+health.beat("classify")            # el hilo "vuelve"
+_wd._last_ping = 0.0
+_wd.tick()
+try:
+    check("ping resumes on recovery", _rx.recv(64) == b"WATCHDOG=1")
+except TimeoutError:
+    check("ping resumes on recovery", False, "(timeout)")
+_rx.close()
+del os.environ["NOTIFY_SOCKET"]
+
+print("10. startup validation")
 check("bench escape hatch allows start", C.TWILIO_CONFIGURED is False and C.ALLOW_NO_TWILIO is True)
 try:
     C.validate_startup_config()
