@@ -31,8 +31,26 @@ if ! id "${SERVICE_USER}" &>/dev/null; then
 fi
 
 # ── 1. System packages ────────────────────────────────────────────────────────
+# BLAS: numpy/scipy need one. Debian removed ATLAS after bookworm, so
+# libatlas-base-dev has no installation candidate on trixie and later — apt
+# fails the whole install. Pick whichever the running release actually ships.
 apt-get update
-apt-get install -y python3-pip alsa-utils libatlas-base-dev libportaudio2 git
+
+BLAS_PKG=""
+for candidate in libopenblas-dev libatlas-base-dev libblas-dev; do
+    if apt-cache policy "$candidate" 2>/dev/null | grep -q "Candidate: [^(]"; then
+        BLAS_PKG="$candidate"
+        break
+    fi
+done
+if [ -z "$BLAS_PKG" ]; then
+    echo "ERROR: no BLAS package available (tried libopenblas-dev, libatlas-base-dev, libblas-dev)."
+    echo "       numpy/scipy will not build or run. Fix apt sources before continuing."
+    exit 1
+fi
+echo "BLAS provider: ${BLAS_PKG}"
+
+apt-get install -y python3-pip python3-venv alsa-utils "$BLAS_PKG" libportaudio2 git
 
 # ── 2. Audio HAT overlay ──────────────────────────────────────────────────────
 # D-009: which ADC is actually installed (HifiBerry DAC+ ADC Pro vs Codec Zero)
@@ -58,7 +76,28 @@ mkdir -p "${OCEANKIND_DIR}/logs" "${OCEANKIND_DIR}/clips"
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${OCEANKIND_DIR}"
 
 # ── 4. Python dependencies (production set — see requirements.txt) ────────────
-pip3 install --break-system-packages -r "${REQ_FILE}"
+# Into a venv, NOT the system interpreter. `pip --break-system-packages` fails
+# here the moment a dependency needs a newer version of something dpkg owns:
+# pip cannot uninstall a Debian-installed package (no RECORD file) and aborts
+# mid-install — which is how a trixie provision dies on urllib3. Forcing it
+# with --ignore-installed would overwrite dpkg's files and leave apt broken on
+# a unit nobody can reach; that is the worse failure. The venv gives the
+# service its own dependency set and touches nothing the OS manages.
+VENV_DIR="${OCEANKIND_DIR}/venv"
+VENV_PY="${VENV_DIR}/bin/python"
+
+if [ ! -x "${VENV_PY}" ]; then
+    python3 -m venv "${VENV_DIR}"
+    echo "Virtualenv created at ${VENV_DIR}"
+else
+    echo "Virtualenv already present at ${VENV_DIR}"
+fi
+
+# piwheels (prebuilt ARM numpy/scipy) is configured in /etc/pip.conf, which a
+# venv inherits. If pip starts COMPILING scipy, that lookup failed — stop and
+# fix it rather than waiting out a multi-hour source build on this chip.
+"${VENV_PY}" -m pip install --upgrade pip
+"${VENV_PY}" -m pip install -r "${REQ_FILE}"
 
 # ── 5. Copy the production system (launcher + oceankind package) ─────────────
 cp "${SRC_DIR}"/*.py "${OCEANKIND_DIR}/"
@@ -81,7 +120,7 @@ Wants=network-online.target
 Type=simple
 User=${SERVICE_USER}
 WorkingDirectory=${OCEANKIND_DIR}
-ExecStart=/usr/bin/python3 ${OCEANKIND_DIR}/marfutura_iot_audio.py
+ExecStart=${VENV_PY} ${OCEANKIND_DIR}/marfutura_iot_audio.py
 Restart=always
 RestartSec=15
 # Watchdog (R-2.7): the service pings WATCHDOG=1 only while its worker threads
@@ -178,6 +217,10 @@ echo "  1. Edit /etc/oceankind.env  (device ID, site, coords, Twilio, Azure)"
 echo "  2. Reboot: sudo reboot"
 echo "  3. Check:  sudo systemctl status oceankind"
 echo "  4. Logs:   journalctl -u oceankind -f"
+echo ""
+echo "  Dependencies live in ${VENV_DIR}, not the system Python."
+echo "  To run anything that imports the oceankind package by hand, use"
+echo "  ${VENV_PY} — plain 'python3' will not see numpy/scipy/azure."
 echo ""
 echo "  The service refuses to start with missing secrets."
 echo "  That is by design (R-8.1) — fill the env file."

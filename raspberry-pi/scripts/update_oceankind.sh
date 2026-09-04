@@ -15,6 +15,24 @@ set -e
 
 REPO_DIR="$HOME/oceankind/code"
 SERVICE_NAME="oceankind"
+
+# El servicio corre desde el venv que crea setup.sh (ExecStart apunta ahí).
+# Las dependencias DEBEN instalarse en ese mismo intérprete: un `pip3
+# --break-system-packages` instalaría en el Python del sistema, que el servicio
+# ya no usa — el update diría "dependencias actualizadas" y el servicio seguiría
+# con las viejas. Además falla en trixie (pip no puede desinstalar paquetes de
+# dpkg). Si el venv no existe (unidad provisionada antes de este cambio), se
+# avisa fuerte y se conserva el comportamiento anterior.
+VENV_PY="$HOME/oceankind/venv/bin/python"
+pip_install() {
+    if [ -x "$VENV_PY" ]; then
+        "$VENV_PY" -m pip install -r "$1" -q
+    else
+        echo "[$TIMESTAMP] AVISO: no hay venv en $VENV_PY — instalando en el Python"
+        echo "[$TIMESTAMP]        del sistema. Re-provisiona con setup.sh."
+        pip3 install -r "$1" --break-system-packages -q
+    fi
+}
 LOG_FILE="/tmp/oceankind/logs/update.log"
 ONESHOT_FLAG="/var/tmp/oceankind_update_pending"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
@@ -59,7 +77,7 @@ if [ -f "$ONESHOT_FLAG" ]; then
 
         if [ -f "$REPO_DIR/requirements.txt" ]; then
             echo "[$TIMESTAMP] Actualizando dependencias..."
-            pip3 install -r "$REPO_DIR/requirements.txt" --break-system-packages -q
+            pip_install "$REPO_DIR/requirements.txt"
         fi
         echo "[$TIMESTAMP] ✓ Código actualizado a $REMOTE"
     fi
@@ -140,7 +158,7 @@ git pull origin main 2>&1
 
 if [ -f "$REPO_DIR/requirements.txt" ]; then
     echo "[$TIMESTAMP] Actualizando dependencias..."
-    pip3 install -r "$REPO_DIR/requirements.txt" --break-system-packages -q
+    pip_install "$REPO_DIR/requirements.txt"
 fi
 
 # Reiniciar servicio

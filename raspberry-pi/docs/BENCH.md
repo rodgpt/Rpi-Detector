@@ -192,9 +192,25 @@ ssh marfutura@oceankind-bench.local
 sudo bash ~/Rpi-Detector/raspberry-pi/scripts/setup.sh
 ```
 
+BLAS note: Debian removed ATLAS after bookworm, so `libatlas-base-dev` has no
+installation candidate on **trixie** and `apt-get install` aborts the whole
+script at step 1. `setup.sh` now probes `libopenblas-dev` → `libatlas-base-dev`
+→ `libblas-dev` and installs the first the running release actually offers,
+printing which one it picked. If none exist, it stops with a loud error rather
+than leaving numpy/scipy without a BLAS.
+
 The script installs system packages (incl. `libportaudio2`), the Python
 dependency set, copies the `oceankind/` package, writes the systemd unit, and
 installs `raspberry-pi/oceankind.env` to `/etc/oceankind.env`.
+
+Dependencies go into a **virtualenv at `~/oceankind/venv`**, and the systemd
+unit's `ExecStart` points at it. They are deliberately not installed into the
+system Python: `pip --break-system-packages` aborts as soon as a dependency
+needs a newer version of something dpkg owns (pip cannot uninstall a Debian
+package — no RECORD file), which is what kills a trixie provision on `urllib3`.
+Consequence for hand-running anything that imports the `oceankind` package on
+the Pi: use `~/oceankind/venv/bin/python`, not `python3`. The commands in §5–6
+below are stdlib-only (`json.tool`, `validate_contract.py`) and work with either.
 
 On the 32-bit image, numpy/scipy come **prebuilt from piwheels** (Raspberry Pi
 OS ships pip preconfigured for it). If pip ever says "Building wheel for
