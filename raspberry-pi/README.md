@@ -41,6 +41,13 @@ The v1 description of this folder — one 1,308-line file, strictly sequential, 
 ```bash
 python3 tools/v2_conformance_test.py     # drives the real emit code → CONFORMANT
 python3 tools/phase1_smoke_test.py       # fail-loud + signed-config behaviour
+bash    tools/ota_rollback_test.sh       # breaks an update on purpose → ALL PASS
+
+# on the bench Pi (needs the service venv, not system python3):
+~/oceankind/venv/bin/python tools/inject_event.py --count 3   # emit events by hand
 ```
 
 Bench procedure, from blank SD to acceptance numbers against real Azure: `docs/BENCH.md`.
+Day-to-day bench commands (restart, change the event rate, inject events, read
+the output) are in the **cheat sheet at the top of that file** — start there
+rather than re-deriving them.

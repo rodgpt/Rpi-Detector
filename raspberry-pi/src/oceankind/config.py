@@ -134,8 +134,19 @@ BLOCK_FRAMES    = int(os.environ.get("OCEANKIND_BLOCK_FRAMES", "4800"))   # 0.1 
 AUDIO_DEVICE_NAME = os.environ.get("OCEANKIND_AUDIO_DEVICE_NAME",
                                    "hifiberry,sndrpihifiberry,dacplusadc,codec")
 # Fuente de audio: "device" (hardware) o "synthetic:<patrón>" para banco sin
-# hidrófono (R-9.4). Patrones: tone | noise | impulse | silence.
+# hidrófono (R-9.4).
 AUDIO_SOURCE = os.environ.get("OCEANKIND_AUDIO_SOURCE", "device").strip().lower()
+
+# Patrones sintéticos implementados. ÚNICA definición: `capture.make_source` la
+# usa para construir la fuente y `validate_startup_config` para rechazar
+# cualquier otra cosa. Con dos listas separadas esto vuelve a divergir.
+SYNTHETIC_PATTERNS = ("tone", "noise", "impulse", "silence")
+
+
+def synthetic_pattern(source: str | None = None) -> str:
+    """Patrón de "synthetic[:<patrón>]". Sin sufijo → tone."""
+    src = AUDIO_SOURCE if source is None else source
+    return (src.split(":", 1) + ["tone"])[1].strip() or "tone"
 
 # Salud del audio (hidrófono desconectado)
 AUDIO_FLOOR_RMS       = float(os.environ.get("OCEANKIND_AUDIO_FLOOR_RMS", "0.0005"))
@@ -408,6 +419,17 @@ def validate_startup_config() -> None:
         problems.append(f"OCEANKIND_DETECTION_MODE={DETECTION_MODE!r} inválido (psd|rms|auto)")
     if AUDIO_SOURCE != "device" and not AUDIO_SOURCE.startswith("synthetic"):
         problems.append(f"OCEANKIND_AUDIO_SOURCE={AUDIO_SOURCE!r} inválido (device|synthetic:<patrón>)")
+    elif AUDIO_SOURCE.startswith("synthetic"):
+        # El patrón se valida, no solo el prefijo. `synthetic:tonee` pasaba el
+        # prefijo y caía en el `else` de capture._block: silencio puro. Una
+        # soak de 24 h con duty cycle perfecto, cero detecciones y ningún
+        # error — sordo-silencioso en el camino que valida todo lo demás.
+        pat = synthetic_pattern()
+        if pat not in SYNTHETIC_PATTERNS:
+            problems.append(
+                f"OCEANKIND_AUDIO_SOURCE={AUDIO_SOURCE!r}: patrón {pat!r} no existe. "
+                f"Válidos: {'|'.join(SYNTHETIC_PATTERNS)}. Un patrón desconocido "
+                "generaría silencio y el banco no detectaría nada sin avisar.")
     if BACKEND_URL and not DEVICE_KEY:
         problems.append("OCEANKIND_BACKEND_URL definida pero falta OCEANKIND_DEVICE_KEY — "
                         "la clave por dispositivo la emite el backend al registrar la unidad.")

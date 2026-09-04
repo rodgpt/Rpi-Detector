@@ -106,6 +106,14 @@ cp -R "${SRC_DIR}/oceankind" "${OCEANKIND_DIR}/oceankind"
 # ml_mfcc detector model (used only if that detector is enabled; see env file)
 [ -f "${SCRIPT_DIR}/../models/model.joblib" ] && \
     cp "${SCRIPT_DIR}/../models/model.joblib" "${OCEANKIND_DIR}/model.joblib"
+
+# Operational scripts. update_oceankind.sh MUST land here: both its own header
+# and protect_sd.sh tell the operator to run ~/oceankind/update_oceankind.sh,
+# and until now nothing ever put it there — the documented OTA command pointed
+# at a file that did not exist on a freshly provisioned unit.
+cp "${SCRIPT_DIR}/update_oceankind.sh" "${SCRIPT_DIR}/protect_sd.sh" "${OCEANKIND_DIR}/"
+chmod +x "${OCEANKIND_DIR}/update_oceankind.sh" "${OCEANKIND_DIR}/protect_sd.sh"
+
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${OCEANKIND_DIR}"
 echo "Production code copied to ${OCEANKIND_DIR}"
 

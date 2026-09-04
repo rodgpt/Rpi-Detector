@@ -59,6 +59,86 @@ Phase 5.
 
 ---
 
+## Cheat sheet — the commands you will re-run
+
+Everything here assumes `marfutura@oceankind-bench.local` and the paths
+`setup.sh` creates. **Dependencies live in the service venv**, so anything that
+imports the `oceankind` package needs `~/oceankind/venv/bin/python`; plain
+`python3` will not find numpy.
+
+**Push code from the Mac** (repo root) — then re-run `setup.sh` only if `src/`
+or `scripts/` changed. It will not overwrite an existing `/etc/oceankind.env`:
+
+```bash
+rsync -av --exclude .git --exclude legacy --exclude '__pycache__' \
+    ./ marfutura@oceankind-bench.local:~/Rpi-Detector/
+ssh marfutura@oceankind-bench.local 'sudo bash ~/Rpi-Detector/raspberry-pi/scripts/setup.sh'
+```
+
+**Service:**
+
+```bash
+sudo systemctl restart oceankind
+sudo systemctl status oceankind
+journalctl -u oceankind -f
+journalctl -u oceankind --since "1 hour ago" | grep -iE "error|degrad|deaf"
+```
+
+**Change the event rate** — `sudo nano /etc/oceankind.env`, one line, then
+restart. There is no events-per-hour setting; see "Controlling the event rate"
+in §4 for why:
+
+```bash
+OCEANKIND_AUDIO_SOURCE=synthetic:noise   # ~no detections — the quiet baseline
+OCEANKIND_AUDIO_SOURCE=synthetic:tone    # fires every 5 s window, ~17 280/day
+```
+
+**Send events by hand** (works with the quiet baseline — this is how you get a
+controlled cadence):
+
+```bash
+V=~/oceankind/venv/bin/python
+I=~/Rpi-Detector/raspberry-pi/tools/inject_event.py
+
+$V $I                              # one event, now
+$V $I --count 5 --interval 2       # five, 2 s apart
+$V $I --count 24 --interval 3600   # one an hour for a day (run under tmux)
+$V $I --suppressed                 # the cooldown case: recorded, no clip
+$V $I --dry-run                    # print the JSON, write nothing
+```
+
+Or on a schedule — `crontab -e`, hourly:
+
+```
+0 * * * * /home/marfutura/oceankind/venv/bin/python /home/marfutura/Rpi-Detector/raspberry-pi/tools/inject_event.py >> /tmp/oceankind/logs/inject.log 2>&1
+```
+
+**Read the output** (stdlib only — system `python3` is fine here):
+
+```bash
+python3 -m json.tool ~/oceankind/out/sites/banco/status.json | grep -A14 '"health"'
+ls ~/oceankind/out/sites/banco/events/$(date -u +%Y/%m/%d)/ | wc -l   # events today
+python3 tools/validate_contract.py ~/oceankind/out                    # from the repo root
+```
+
+**Check it is really listening** — the startup line names the pattern actually
+in use. A typo now refuses to start rather than quietly generating silence, so
+this is a confirmation, not a trap:
+
+```bash
+journalctl -u oceankind | grep "Fuente sintética iniciada"
+```
+
+**Tests, on the Mac:**
+
+```bash
+python3 raspberry-pi/tools/v2_conformance_test.py   # → CONFORMANT
+python3 raspberry-pi/tools/phase1_smoke_test.py
+bash    raspberry-pi/tools/ota_rollback_test.sh     # → ALL PASS
+```
+
+---
+
 ## 0. Before you start
 
 **Physical checklist**
@@ -257,10 +337,58 @@ OCEANKIND_STORAGE_CONTAINER=alerts
 # Worst case on purpose: the tone pattern makes the detector fire on EVERY window.
 # ~17k event blobs/day — see §0.1 before running this against Azure.
 OCEANKIND_AUDIO_SOURCE=synthetic:tone
+# Too many? Use synthetic:noise instead and inject events on demand:
+#   ~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py --count 3
+# See "Controlling the event rate" below — there is no knob that thins them out.
 # 1 notified event per hour; the rest recorded as suppressed. Cooldown throttles
 # NOTIFICATIONS ONLY — it does not reduce the blob count (D-008, F-03).
 OCEANKIND_ALERT_COOLDOWN_S=3600
 ```
+
+### Controlling the event rate
+
+There is **no events-per-hour setting**, and it is worth understanding why
+before hunting for one.
+
+Capture is continuous and every 5 s window is classified, by design (Phase 2).
+`OCEANKIND_WINDOW_HOP_S` looks like the knob and is not: `capture.py:217`
+retains `data[hop_frames:]` between windows, which is already empty at the
+default 5.0, so any value **≥ 5 behaves identically**. The hop can only make
+windows *overlap* (hop < 5), raising the rate. It cannot lower it.
+
+The cooldown does not reduce events either — it only decides `suppressed` and
+whether a clip is carried. Recording every detection is deliberate (D-008,
+F-03): the event record is the scientific evidence of activity, so throttling
+alerts must never throttle data.
+
+So with a constant synthetic signal the levers are all-or-nothing:
+
+| Setting | Result |
+|---|---|
+| `synthetic:tone` | fires every window — ~17 280 events/day, ~24 with clips |
+| `synthetic:noise` | broadband, no tonal peaks — effectively no detections |
+| `synthetic:impulse` | a 0.25 s burst per window — still every window |
+| `OCEANKIND_PSD_THRESHOLD_DB`, `OCEANKIND_ALERT_MIN_RMS` | raise above the signal and *nothing* fires; below and *everything* does |
+
+**The usable bench setup is therefore a quiet source plus events on demand.**
+Run the soak on `synthetic:noise` — that still exercises continuous capture,
+the duty cycle, the health block, telemetry and `status.json`, which is what
+the 24 h run is actually for — and inject events when you want them:
+
+```bash
+~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py            # one
+~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py --count 5 --interval 2
+~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py --dry-run  # print, write nothing
+```
+
+It goes through `storage.build_event` / `write_event` / `push.push_event` — the
+same functions the transport worker uses — so the blob is contract-identical
+and lands wherever the env file points. Injected events carry
+`detector: "manual"` and `detector_meta.injected: true`, so they are
+distinguishable in the record. It deliberately does **not** send WhatsApp.
+
+Only the `tone` run gives you the ~17k-blob worst case, so keep it for the
+throughput question specifically (§0.1) rather than as the default.
 
 **The one mistake that silently wastes the run:** leaving `OCEANKIND_OUTPUT_DIR`
 set *and* filling in the connection string. `storage.py:60` checks `OUTPUT_DIR`

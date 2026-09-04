@@ -116,6 +116,14 @@ class SyntheticSource:
     def __init__(self, block_queue: queue.Queue, pattern: str = "tone",
                  time_scale: float = 1.0):
         self._queue = block_queue
+        # Segunda línea de defensa: la validación de arranque ya rechaza los
+        # patrones desconocidos, pero esta clase también se construye desde los
+        # tests. Silencio por accidente es indistinguible de un hidrófono
+        # muerto, así que se grita en vez de asumirlo.
+        if pattern not in C.SYNTHETIC_PATTERNS:
+            raise ValueError(
+                f"patrón sintético {pattern!r} desconocido "
+                f"(válidos: {'|'.join(C.SYNTHETIC_PATTERNS)})")
         self._pattern = pattern
         self._scale = max(0.01, time_scale)
         self._stop = threading.Event()
@@ -140,7 +148,7 @@ class SyntheticSource:
             pos = self._frame_pos % clip_len
             if pos < int(0.25 * C.SAMPLE_RATE):
                 mono += 0.9 * self._rng.standard_normal(n)
-        else:  # silence
+        else:  # silence — el único patrón restante; el resto ya se rechazó
             mono = np.zeros(n)
         pcm = (np.clip(mono, -1, 1) * 32000).astype(np.int16)
         return np.column_stack([pcm] * C.CHANNELS)
@@ -173,8 +181,10 @@ class SyntheticSource:
 def make_source(block_queue: queue.Queue, time_scale: float = 1.0):
     """Fábrica según OCEANKIND_AUDIO_SOURCE: device | synthetic:<patrón>."""
     if C.AUDIO_SOURCE.startswith("synthetic"):
-        pattern = (C.AUDIO_SOURCE.split(":", 1) + ["tone"])[1] or "tone"
-        return SyntheticSource(block_queue, pattern=pattern, time_scale=time_scale)
+        # Mismo parser que usa validate_startup_config: si llegamos aquí el
+        # patrón ya está validado contra C.SYNTHETIC_PATTERNS.
+        return SyntheticSource(block_queue, pattern=C.synthetic_pattern(),
+                               time_scale=time_scale)
     return AudioCapture(block_queue)
 
 

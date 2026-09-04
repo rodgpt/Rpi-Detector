@@ -124,9 +124,10 @@ Aux blobs (`acoustic_indicators.json`, `ocean_conditions.json`): the device writ
 ## Phase 5: Survivable deployment **NOT STARTED**
 
 - [ ] Decide the SD protection method (D-002)
-- [ ] A/B directories with a symlink switch
-- [ ] Post-restart health check, automatic reversion (R-7.1, F-06)
-- [ ] **Prove it: deliberately break an update on the bench unit and watch it revert**
+- [x] ~~A/B directories with a symlink switch~~ — **superseded 2026-09-04**: rollback is by git commit, not by parallel directories. The checkout at `~/oceankind/code` is the source of truth, `.installed_sha` records what is actually installed, and reverting is `git reset --hard <previous>` + reinstall. Same guarantee, no symlink to leave dangling, and it gives version identity (which commit is this unit running?) that A/B directories never did
+- [x] Post-restart health check, automatic reversion (R-7.1, F-06) — 2026-09-04: `update_oceankind.sh` verifies every update for `SETTLE_S` (60 s default) requiring the service active **and** `NRestarts` unchanged — `Restart=always` means "active" alone proves nothing, a crash loop reads as active between restarts. Failure reverts to the previous commit and re-verifies; the bad SHA goes in `.ota_failed_sha` so an unattended unit never retries a commit that already broke it
+- [x] **Prove it: deliberately break an update and watch it revert** — 2026-09-04: `tools/ota_rollback_test.sh`, five scenarios against the real script with stubbed systemd, runs on a workstation. It caught two defects review missed (baseline `NRestarts` sampled before the restart; version identity taken from the checkout instead of the install)
+- [ ] **Re-prove it on the bench unit** — the harness stubs systemd, so two paths are still unproven on hardware: passwordless sudo from cron, and the overlayfs two-phase reboot sequence. See the open TODO item
 - [x] Watchdog for the hang case (R-2.7) — 2026-08-26: `watchdog.py` + `WatchdogSec=120`/`NotifyAccess=main` in the unit; pings gated on classify/transport thread heartbeats, so a hang restarts and a degraded-but-alive state does not. Verified with a real notify socket (smoke test §9). Bench soak exercises it for real under systemd
 - [ ] Scoped write credential instead of the storage account key (R-8.4, F-07) — **mechanism decided, D-017**: one Entra service principal per device, custom write-only role, ABAC condition on `sites/{site}/*`, never delete, never list. Sub-tasks:
   - [ ] Custom RBAC role definition (`blobs/write` + `blobs/add/action` only) and the ABAC condition, scripted so provisioning is repeatable
