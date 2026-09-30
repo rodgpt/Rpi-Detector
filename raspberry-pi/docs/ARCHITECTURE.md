@@ -44,6 +44,8 @@ power on → kernel → systemd → oceankind.service → marfutura_iot_audio.py
                          spool drain, WhatsApp retry, heartbeats — each on its own timer
 ```
 
+**Heartbeat tick, restructured 2026-09-23 (D-018).** `main.py`'s status/telemetry step on the housekeeping timer used to be one function (`upload_status`), gated as a whole on `STORAGE_ENABLED` — which meant a unit with no storage skipped collecting status entirely, not just uploading it. Split in two: `collect_status()` (reads VE.Direct/modem/`/proc`, builds the `status.json` document) now runs on every tick unconditionally, wrapped in its own try/except so a sensor-read failure cannot take down the loop; `write_status_blob()` (the actual blob PUT) still runs only under `STORAGE_ENABLED`. The direct `POST /api/devices/heartbeat` (`push.py:post_heartbeat()`) runs right after collection, gated only on `push.enabled()` — independent of storage. Spool drain (`storage.drain_event_spool()`) stays unconditional on `STORAGE_ENABLED` but no longer coupled to collection succeeding, which it previously was by accident of both living in one function.
+
 Shutdown (SIGTERM/SIGINT) is ordered: source stops, workers join, undelivered transport jobs are preserved as spooled events — the record survives a restart; only un-uploaded clip audio is lost, counted.
 
 A hang is no longer invisible (R-2.7, 2026-08-26): under systemd, `watchdog.py` pings `WATCHDOG=1` only while the classify and transport threads prove alive (a heartbeat per loop iteration, empty ones included); a hung thread starves the ping and `WatchdogSec=120` restarts the service. Outside systemd (bench runs by hand) the watchdog is a no-op. The superseded monoliths are preserved in `legacy/superseded-monolith/`.

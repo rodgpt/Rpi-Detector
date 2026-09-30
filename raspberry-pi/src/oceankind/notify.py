@@ -170,6 +170,15 @@ def send_whatsapp_heartbeat(session_start: datetime, alert_count: int,
     hardware ni sensores (eso es de telemetry, en su propio hilo)."""
     if not C.TWILIO_TO or "XXXXXXXXX" in C.TWILIO_TO:
         return
+    # Mismo guard que send_whatsapp() ya tiene y este no tenía: sin él,
+    # _wa_send() registra "NO enviado" y vuelve sin lanzar excepción, y el
+    # log.info de "enviado" de abajo se ejecutaba igual — un heartbeat que
+    # falló silenciosamente se reportaba como éxito. Encontrado en banco
+    # (2026-09-23): el journal mostraba las dos líneas contradictorias
+    # seguidas, "NO enviado" y "enviado", para el mismo intento.
+    if not C.TWILIO_CONFIGURED:
+        log.error("Heartbeat WhatsApp NO enviado (sin credenciales Twilio — modo banco)")
+        return
     try:
         elapsed = (datetime.now(timezone.utc) - session_start).total_seconds()
         session_up = fmt_uptime(elapsed)

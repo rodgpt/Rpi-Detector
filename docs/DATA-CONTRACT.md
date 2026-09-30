@@ -31,11 +31,11 @@ Four hops, and this document governs everything up to the backend:
 ```
 device  ->  blob storage  ->  backend API  ->  browser
    │    \____ this contract ____/   \__ API-CONTRACT.md __/
-   └──────► POST /api/devices/events ─┘
-            also this contract — see Event upload
+   ├──────► POST /api/devices/events ────┘   fast path for EVENTS. see Event upload
+   └──────► POST /api/devices/heartbeat ─┘   fast path for STATUS. see Device heartbeat
 ```
 
-The storage path is the durable one and the record. The direct POST is a latency path that carries the same event and is allowed to fail; it is specified here rather than only in `API-CONTRACT.md` because it crosses between the two codebases, which is what this document is for.
+The storage path is the durable one and the record — for events. `status.json` is different: it is a snapshot with no historical value, overwritten every heartbeat, so it has no equivalent "durable, never lose one" obligation, and unlike events the direct POST is not merely a latency shortcut alongside storage — it is what carries liveness to the backend for any unit with no storage configured at all (Azure or a local bridge). Both direct POSTs are allowed to fail; both are specified here rather than only in `API-CONTRACT.md` because they cross between the two codebases, which is what this document is for.
 
 Until the backend existed, the browser read storage directly and every rule below was a rule about what the browser had to tolerate. That is no longer true. **The backend is the only consumer of these blobs.** It reads storage with a credential the browser never sees, validates what it finds against this contract, and serves a paginated HTTP API described in `API-CONTRACT.md`.
 
@@ -215,6 +215,8 @@ Five fields exist because the prototype layout got them wrong. The reasoning, no
 ## `status.json`
 
 Overwritten each heartbeat. Only fields the dashboard actually consumes, plus the health fields it needs and does not yet have.
+
+This section is the shape of the document. **Device heartbeat**, below, is how it gets to the backend — the same document, written to blob storage AND POSTed directly, because a unit with no storage configured still has to be observable as alive.
 
 ```jsonc
 {
@@ -508,6 +510,76 @@ This is containment, not revocation. Revoking a compromised unit is deleting or 
 The device keeps its storage credentials and keeps writing blobs and clips exactly as before. Nothing in **Event blob**, **Path scheme** or the spool behaviour moves. A backend that has never received a single POST still holds a complete and correct record, arriving via the reconcile pass; this endpoint buys latency and nothing else.
 
 Consumers maintaining a derived view still owe both obligations under **Path scheme** — trailing window, keyed on `event_id`. This endpoint does not relax either, and a consumer that treats the push as its ingestion mechanism has reintroduced exactly the silent under-reporting those obligations exist to prevent.
+
+---
+
+## Device heartbeat
+
+**Status: BUILT 2026-09-23**, both sides. Specified the same day, driven by a bench finding: a unit with no Azure or local storage configured had no liveness signal at all — `status.json` was never written, so the dashboard showed nothing for it and `silence.py` (`_Dashboard-Detector/backend/app/services/silence.py`) had nothing to read. Storage is not required for this route; it exists precisely for the case where storage is absent.
+
+Device implementation: `oceankind/push.py:post_heartbeat()`, called from the main housekeeping loop every `heartbeat_interval_s` alongside (not instead of) the `status.json` blob write. Backend implementation: `POST /api/devices/heartbeat` in `app/routers/devices.py`, backed by two tables — `DeviceStatus` (current, one row per device) and `DeviceStatusHistory` (append-only) — added in `alembic/versions/b48e6f1a9d02_device_status_heartbeat.py`.
+
+Two delivery paths for the same document, for the same reason **Event upload** has two:
+
+```
+device ──► blob storage ──► backend      durable when storage exists. no history value — overwritten every heartbeat
+   └─────► POST /api/devices/heartbeat   the only signal at all when storage does not exist
+```
+
+### The document is `status.json`, unchanged
+
+The POST body is byte-identical to what would be written to `sites/{site_id}/status.json` — see **`status.json`** above for the shape. No wrapper, no second schema, no subset. `last_seen` is the field everything here hinges on.
+
+### Request
+
+```
+POST /api/devices/heartbeat
+X-Device-Id:  Rpi_bench
+X-Device-Key: <the key issued once at registration>
+Content-Type: application/json
+
+<the status.json document>
+```
+
+`last_seen` MUST carry a UTC offset, same rule and same reason as `captured_utc` under **Event upload**. Missing or naive is `400`.
+
+### No retry, by design — this is the opposite of Event upload
+
+**Event upload** is built to retry from a spool, because a lost event is unrecoverable and the blob is the backstop. A heartbeat has no backstop and no history value once superseded: a stale reading describes a moment that has already passed, and retrying it risks delivering it *after* a fresher heartbeat has already landed, regressing what the dashboard shows. So the device never retries or spools a failed heartbeat — it tries once, on the next tick it has a new one anyway. This is the correct behaviour specifically because the payload is a snapshot, not an event.
+
+A run of consecutive failures is not silent: the device tracks a fail streak (`push.py`) and once it reaches 3, `status.json → health.degraded_reason` says so and `status.json → health.heartbeat_fail_streak` carries the count — surfaced the next time a heartbeat or blob write actually succeeds. A `401` also sets the same auth-failed flag that halts event pushes, since a revoked device credential is revoked for both routes.
+
+### Monotonic, enforced by the backend — not only by device discipline
+
+The device's "never retry" rule is the first half of the no-regression guarantee. The second half lives on the server: the route accepts an out-of-order or duplicate POST without error (still `202` — a device must never treat this response as something to act on) but silently ignores it if `last_seen` is not strictly newer than what is already stored for that device. Equal counts as not-newer. Response body says `{"accepted": false, "reason": "..."}` when ignored; the device does not read this field, it exists for debugging and for the test suite.
+
+This makes correctness structural rather than a matter of the device behaving well: even a misbehaving or buggy device cannot regress the stored reading by racing requests or retrying against the guidance above.
+
+### Two writes, always together
+
+Every accepted heartbeat writes both tables: `DeviceStatus` is upserted (current reading, one row per device, what `GET /api/sites/{site_id}/status` reads) and `DeviceStatusHistory` gets an appended row (one per accepted heartbeat, kept indefinitely — cheap, and the only long-term record of device trend/uptime that does not depend on blob storage). An ignored (stale/duplicate) heartbeat writes neither — it left no trace, because it did not happen as far as the record is concerned.
+
+### Status codes, and what the device does with each
+
+| Code | Means | Device does |
+|---|---|---|
+| `202`, `accepted: true` | Stored | Nothing further — next heartbeat is a new tick regardless |
+| `202`, `accepted: false` | Stale or duplicate, ignored | Nothing — this is not an error, and never retried anyway |
+| `400` | Missing or naive `last_seen` | A device-side bug. Log loudly, do not retry this one |
+| `401` | Bad or revoked credential | Same handling as **Event upload**'s `401` — stop, surface in `health.degraded_reason` |
+| `5xx`, timeout, connection refused | Backend down, deploying, or unreachable | Log, increment the fail streak, do **not** retry or spool |
+
+`409` is never returned — an out-of-order POST is `202`/`accepted: false`, not a conflict.
+
+### Reading side: freshest of two signals
+
+`GET /api/sites/{site_id}/status` (`app/routers/data.py`) no longer reads only the blob. It compares `last_seen` between `sites/{site_id}/status.json` (if it exists) and `DeviceStatus` (if it exists) and serves whichever is newer, with an ETag over whichever body wins so conditional-GET keeps working across a source change. A unit reporting through only one of the two — the normal case for a bench unit with no storage — is fully covered by that one; the comparison only matters when both exist and can each be stale by up to one heartbeat interval.
+
+`silence.py` (`_Dashboard-Detector/backend/app/services/silence.py`) makes the same comparison independently, for the same reason: liveness alerting must not go blind for a unit that only has one of the two signals.
+
+### What this does not change
+
+`status.json` in blob storage is still written on every heartbeat by any unit with storage configured, exactly as **`status.json`** above describes. This route is additive — it does not replace the blob, and a unit with storage configured keeps writing it regardless of whether the POST above succeeds. Nothing about `power_history.json`, `acoustic_indicators.json` or `ocean_conditions.json` changes; those remain blob-only, on their own rollup cadence, unrelated to this route.
 
 ---
 

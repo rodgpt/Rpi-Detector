@@ -12,6 +12,7 @@ Phased build plan. Each phase produces something runnable. Requirement IDs refer
 **Phase 1 code complete (2026-08-12).** Open: token rotation (client), clean provision (bench time).
 **Phase 2 code complete (2026-08-13).** Continuous capture: `oceankind/` package, four threads, capture never blocks. Verified by `tools/pipeline_soak_test.py`. Open: Zero 2W soak (memory + 24 h duty ≥99 %) — **the next thing that needs the bench unit**.
 **Phase 4 device side done early (2026-08-13, D-016).** v2 only, new storage, prototypes frozen. Verified by `tools/v2_conformance_test.py`. Open: index tags (needs Azure), dashboard v2 reader (their side, deferred by client).
+**Heartbeat POST built 2026-09-23 (D-018).** Liveness no longer depends on storage being configured — `status.json` also goes direct to `POST /api/devices/heartbeat`, backend-enforced monotonic, with a `DeviceStatusHistory` trend table. See contract §Device heartbeat.
 
 Entry point unchanged for systemd: `marfutura_iot_audio.py` → `oceankind.main`. Next in queue: **Phase 3, detector registry** (the two-model harness), now unblocked because detection runs on its own worker.
 
@@ -81,7 +82,7 @@ Verified by `tools/pipeline_soak_test.py`: real threaded pipeline, synthetic sou
 - [x] Telemetry off `/boot/firmware` (R-6.2, F-16) — CSV in `STATE_DIR` (tmpfs), trimmed, nothing writes to the boot partition
 - [x] Battery dedup state out of hardcoded `/tmp` (R-6.4, F-19) — in `STATE_DIR`; survives service restarts. Reboot persistence needs the D-002 partition (one env var when it lands)
 - [x] Split the monolith into modules — `oceankind/` package (config, storage, capture, detector, pipeline, telemetry, notify, health, main); launcher name kept for systemd
-- [x] Synthetic audio source so the pipeline runs with no hydrophone (R-9.4) — `synthetic:tone|noise|impulse|silence`, time-scalable for tests
+- [x] Synthetic audio source so the pipeline runs with no hydrophone (R-9.4) — `synthetic:tone|noise|impulse|silence|sporadic`, time-scalable for tests. `sporadic` (2026-09-22) fires the real detector at a chosen average rate (`OCEANKIND_SYNTHETIC_SPORADIC_MEAN_S`) via Poisson-spaced tone bursts, for proving the unattended pipeline over time without the all-or-nothing `tone`/`noise` choice
 - [x] Overlapping analysis windows (`window_hop_s`, 2026-08-13) — boundary-straddling short events no longer diluted by phase luck; remotely tunable, clamped 1–5 s, default 5.0 (calibrated no-overlap behaviour). Choosing a value is the client's call (CLIENT-DEPENDENCIES 13); bench CPU numbers feed that decision
 - [ ] Soak on the Zero 2W, resident memory measured against 512 MB (R-7.5) — **procedure: `docs/BENCH.md`**
 - [ ] Duty cycle above 99 percent over 24 hours (R-1.1) — **procedure: `docs/BENCH.md`**; measured on-Mac at 100 % under slowed storage
@@ -113,6 +114,7 @@ Pulled forward by the client's cutover decision: v2 only, new storage, prototype
 - [x] Omit empty buckets from power history (R-6.3) — verified with a deliberate gap in the conformance test
 - [x] Non-finite floats as null, verified (R-4.6)
 - [x] Direct event push to the backend, in parallel with the blob (contract §Event upload, dashboard D-022; 2026-08-26) — `push.py` on the transport worker: byte-identical body, idempotent, full status-code table, 401 as a health event, bounded push spool with heartbeat drain, blob invariant proven with the backend down. Verified by `tools/push_test.py` (27 checks vs a local fake backend). **Disabled until the client provisions `OCEANKIND_BACKEND_URL` + per-device `OCEANKIND_DEVICE_KEY`** (and registers the unit to its site — pushes 403 otherwise)
+- [x] Direct `status.json` heartbeat POST to the backend, independent of storage being configured at all (contract §Device heartbeat, D-018; 2026-09-23) — `push.py:post_heartbeat()`, no retry/no spool by design, fail-streak surfaced in `health.degraded_reason`/`health.heartbeat_fail_streak`. Backend enforces monotonicity on `last_seen` and keeps `DeviceStatusHistory`. Closes the bench finding that a unit with no storage had no liveness signal and could never be flagged silent. Backend verified: 11 new tests plus the full existing 98-test suite unchanged (`_Dashboard-Detector/backend/tests/test_heartbeat.py`)
 - [ ] Index tags on event blobs: site, event_type, detector, score, suppressed — **needs the real Azure account** (GPv2 + tag permissions unverifiable in local mode)
 - [x] **`tools/validate_contract.py` passes with no errors** (R-5.6) — `tools/v2_conformance_test.py` drives the production emit code and validates: CONFORMANT. Rerun against a real bench run when hardware is available
 - [ ] Dashboard v2 reader against the new storage — **now the dashboard's critical path**; until it exists the new fleet is invisible and new WhatsApp `?play=` links do not resolve

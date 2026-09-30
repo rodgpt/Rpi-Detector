@@ -247,6 +247,14 @@ def build_health() -> dict:
     if push.auth_failed():
         reasons.append("credencial del backend rechazada (401) — push de eventos detenido; "
                        "el blob sigue escribiéndose")
+    hb_fail_streak = push.heartbeat_fail_streak()
+    if hb_fail_streak >= 3:
+        # 3 fallos seguidos = 3 intervalos de heartbeat sin contacto — el
+        # mismo umbral que usa el dashboard para marcar "sin contacto"
+        # (STALE_AFTER_MS = 3 × heartbeat_interval_s por defecto). Si esto se
+        # ve, el link es el problema, no el equipo.
+        reasons.append(f"heartbeat: {hb_fail_streak} intentos fallidos seguidos — "
+                       "revisar conectividad")
     with _lock:
         if _config_error:
             reasons.append(f"config remota rechazada: {_config_error}")
@@ -272,6 +280,7 @@ def build_health() -> dict:
         "push_backlog":       push.spool_len(),
         "push_rejected":      push_rejected,
         "push_dropped":       push_dropped,
+        "heartbeat_fail_streak": hb_fail_streak,
         "wa_pending":         notify.pending_alert_count(),
         "archive_queue":      _archive_queue_len(),
         "degraded_reason":    "; ".join(reasons) if reasons else None,

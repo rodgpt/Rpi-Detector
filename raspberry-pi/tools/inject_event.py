@@ -44,8 +44,16 @@ def load_env_file(path: str) -> int:
     p = Path(path)
     if not p.is_file():
         return 0
+    try:
+        text = p.read_text()
+    except PermissionError:
+        print(f"ERROR: no permission to read {path} (mode 600, root-owned by "
+              f"setup.sh). Run this with sudo:\n"
+              f"  sudo ~/oceankind/venv/bin/python {sys.argv[0]} ...",
+              file=sys.stderr)
+        sys.exit(1)
     loaded = 0
-    for line in p.read_text().splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue

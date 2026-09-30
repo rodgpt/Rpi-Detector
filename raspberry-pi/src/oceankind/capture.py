@@ -109,8 +109,12 @@ class AudioCapture:
 class SyntheticSource:
     """Genera bloques como si fuera el hardware. Para banco y tests (R-9.4).
 
-    Patrones: tone (motor: 120+240 Hz), noise, impulse (ráfaga <1s por clip),
-    silence. time_scale>1 acelera la generación para tests.
+    Patrones: tone (motor: 120+240 Hz, dispara SIEMPRE), noise (nunca dispara),
+    impulse (ráfaga <1s por clip, dispara siempre), silence (nunca dispara),
+    sporadic (silencio de fondo con ráfagas de tono espaciadas al azar —
+    dispara el detector real de vez en cuando, sin ser un metrónomo; ver
+    OCEANKIND_SYNTHETIC_SPORADIC_MEAN_S). time_scale>1 acelera la generación
+    para tests.
     """
 
     def __init__(self, block_queue: queue.Queue, pattern: str = "tone",
@@ -130,10 +134,22 @@ class SyntheticSource:
         self._thread: threading.Thread | None = None
         self._rng = np.random.default_rng(7)
         self._frame_pos = 0
+        # "sporadic": una moneda por ventana de 5 s, no por bloque de 0.1 s —
+        # si el sorteo fuera por bloque, un evento casi nunca llenaría una
+        # ventana completa y el detector (que mira la ventana entera) lo
+        # vería diluido, igual que F-XX diluye un blast corto repartido entre
+        # ventanas. p por ventana ≈ CAPTURE_SECONDS / MEAN_S: aproximación
+        # lineal de un proceso de Poisson, válida mientras MEAN_S » 5 s
+        # (con el default de 720 s el error frente a 1-e^(-5/720) es ~0.03%).
+        self._sporadic_window_idx = -1
+        self._sporadic_is_event = False
+        self._sporadic_p = min(1.0, C.CAPTURE_SECONDS
+                               / max(C.CAPTURE_SECONDS, C.SYNTHETIC_SPORADIC_MEAN_S))
 
     def _block(self) -> np.ndarray:
         n = C.BLOCK_FRAMES
-        t = (np.arange(n) + self._frame_pos) / C.SAMPLE_RATE
+        block_start = self._frame_pos    # posición de ESTA muestra, antes de avanzar
+        t = (np.arange(n) + block_start) / C.SAMPLE_RATE
         self._frame_pos += n
         if self._pattern == "tone":
             mono = (0.30 * np.sin(2 * np.pi * 120 * t)
@@ -148,6 +164,28 @@ class SyntheticSource:
             pos = self._frame_pos % clip_len
             if pos < int(0.25 * C.SAMPLE_RATE):
                 mono += 0.9 * self._rng.standard_normal(n)
+        elif self._pattern == "sporadic":
+            # Silencio (ruido de fondo) casi siempre; la ventana entera se
+            # vuelve tono cuando el sorteo de esta ventana sale evento. El
+            # sorteo se hace UNA vez al cruzar a una ventana nueva, no en cada
+            # bloque, para que la ventana completa quede consistente — así el
+            # clasificador real ve exactamente lo que vería con un blast real.
+            # OJO: el índice de ventana se calcula con block_start (inicio de
+            # ESTE bloque), no con self._frame_pos ya avanzado — con el valor
+            # avanzado el sorteo se adelantaba un bloque, contaminando el
+            # último bloque de la ventana saliente con la decisión de la
+            # entrante (encontrado por simulación, 2026-09-22).
+            clip_len = int(C.CAPTURE_SECONDS * C.SAMPLE_RATE)
+            window_idx = block_start // clip_len
+            if window_idx != self._sporadic_window_idx:
+                self._sporadic_window_idx = window_idx
+                self._sporadic_is_event = self._rng.random() < self._sporadic_p
+            if self._sporadic_is_event:
+                mono = (0.30 * np.sin(2 * np.pi * 120 * t)
+                        + 0.25 * np.sin(2 * np.pi * 240 * t)
+                        + 0.01 * self._rng.standard_normal(n))
+            else:
+                mono = 0.05 * self._rng.standard_normal(n)
         else:  # silence — el único patrón restante; el resto ya se rechazó
             mono = np.zeros(n)
         pcm = (np.clip(mono, -1, 1) * 32000).astype(np.int16)

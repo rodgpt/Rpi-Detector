@@ -10,7 +10,7 @@ Domain-only choices that affect nothing outside their folder can live in that fo
 
 ---
 
-> **Decision numbering is per repository, not global.** `Rpi-Detector` and `Dashboard-Detector` each keep their own sequence, and the same number can mean different things in each. **Always qualify a citation from the other repository** (`Rpi-Detector D-017`), never a bare number. Known divergences are flagged in the entries themselves: D-016 and D-017.
+> **Decision numbering is per repository, not global.** `Rpi-Detector` and `Dashboard-Detector` each keep their own sequence, and the same number can mean different things in each. **Always qualify a citation from the other repository** (`Rpi-Detector D-017`), never a bare number. Known divergences are flagged in the entries themselves: D-016, D-017 and D-018.
 
 ## Index
 
@@ -33,6 +33,7 @@ Domain-only choices that affect nothing outside their folder can live in that fo
 | D-015 | DECIDED | Scope boundary: we build plumbing, client provides detection science | Everything |
 | D-016 | DECIDED | v2 cutover now: new units write v2 to a new blob; prototypes frozen on v1 | Contract, Phase 4, D-005, D-007 |
 | D-017 | DECIDED | One credential per device, write-scoped, revocable. No account key on any node | F-07, provisioning, dashboard read path |
+| D-018 | DECIDED | Liveness is a direct POST, not a storage side-effect. Backend enforces monotonicity, keeps history — **this is the stack-level D-018** | `DATA-CONTRACT.md`, silence alerting, units with no storage |
 
 ---
 
@@ -384,3 +385,29 @@ Everything else stays denied. A stolen credential can append to one site's prefi
 **The read half of F-07 is settled elsewhere.** `Dashboard-Detector` D-019 (2026-08-21) builds a FastAPI backend, and its `docs/SERVER-INFRASTRUCTURE.md` states the blob credential is *"held here and nowhere else"* — the browser never reaches storage, and clips are proxied through `/api/`. That is a better answer than the browser-held read-only SAS this decision originally proposed, and it needs no CORS. D-017 therefore governs the **device write** credential only. Confirm with that side that the backend's own credential is scoped rather than the account key, and that it points at the new account. Tracked in `docs/TODO.md`.
 
 **Trickles into.** F-07 (this is its fix), `raspberry-pi/docs/PROGRESS.md`, `raspberry-pi/docs/TODO.md`, `docs/research/azure-storage-deployment.md`, provisioning scripts, `docs/RUNBOOK.md`.
+
+---
+
+## D-018 — Liveness is a direct POST, not a storage side-effect
+
+**Status:** DECIDED, 2026-09-23. **This is the stack-level D-018** and the one `DATA-CONTRACT.md` cites.
+
+`Dashboard-Detector` carries a different D-018, "Fleet-scale credential lifecycle: rotation over the wire, enrollment at the gate" — an unrelated, dashboard-local decision about device credential rotation. The numbers collided because the registers are independent, same as D-016 and D-017 before this. When either repo says D-018 without qualification, it means this one.
+
+**Context.** The bench unit was running with no Azure and no local storage bridge configured (an accepted state — see `raspberry-pi/docs/BENCH.md`), which meant `status.json` was never written. The dashboard showed nothing for it, and — the sharper finding — `silence.py` had nothing to read either, so a unit in this state could never be flagged as silent even if it died outright. Liveness was, until this decision, entirely a side effect of the storage path: no storage configured meant no liveness signal, full stop.
+
+The first shape considered was writing `status.json` locally and having something else move it into blob storage — a cepelynvault-side rsync bridge. That was rejected outright: it depends on inbound SSH access to the device, and the production deployment model is outbound-only with no inbound path ever, by design (`Dashboard-Detector/docs/SERVER-INFRASTRUCTURE.md`). A bench-only fix that cannot survive contact with the real deployment is not a fix.
+
+**Decision.** The device POSTs its `status.json` document directly to the backend (`POST /api/devices/heartbeat`) on every heartbeat, unconditionally — independent of whether storage is configured at all. Three properties, all load-bearing:
+
+1. **No retry, no spool, ever.** A stale heartbeat describes a moment that has already passed; retrying it risks delivering it after a fresher one has already landed, which would regress what the dashboard shows. This is the opposite of **Event upload**'s retry-from-spool design, deliberately — an event is unrecoverable if lost, a heartbeat is superseded by the next tick regardless.
+2. **The backend enforces monotonicity independently of device discipline.** The route accepts any POST (`202` always) but silently ignores one whose `last_seen` is not strictly newer than what is already stored. Rule 1 above is a device-side optimisation, not the guarantee — the guarantee is structural, on the server, so a misbehaving or racing device still cannot regress the stored reading.
+3. **Every accepted heartbeat is kept, not just the latest.** A `DeviceStatusHistory` row is appended alongside the upserted current reading. Cheap (one small row, unconditional heartbeat cadence) and it is the only long-term device-trend record that does not depend on blob storage existing.
+
+**What this does not replace.** A unit with storage configured keeps writing `status.json` to blob storage exactly as before — this is additive, not a migration. `GET /api/sites/{site_id}/status` and `silence.py` (`Dashboard-Detector` D-0xx-equivalent liveness logic, `app/services/silence.py`) both now compare `last_seen` between the blob and the Postgres reading and use whichever is fresher, so neither signal can starve the other. A unit with only one of the two — the normal case for a bench unit — is fully covered by that one.
+
+**Why not skip storage-side status.json entirely and go all-Postgres.** Considered and rejected before implementation: `silence.py` is a substantial, already-tested production system that explicitly documents why it reads blob storage rather than `Device.last_seen` (a different, pre-existing column stamped only when a device authenticates for an event push, which would read as dead during any quiet week). Replacing its read path outright would have broken existing coverage and removed the durable signal for units that do have storage. The freshest-of-two-signals merge was chosen specifically to be additive to that system, not a replacement of it.
+
+**Proof.** Backend: `backend/tests/test_heartbeat.py`, 11 tests — acceptance/upsert/history, monotonic rejection (both strictly-older and equal-timestamp), auth failure, and the freshest-of-two-signals read path in both directions. Full existing suite (98 tests, including all 14 of `test_silence.py`) re-run unchanged and passing alongside the 11 new ones. Migration (`b48e6f1a9d02_device_status_heartbeat.py`) verified via `alembic upgrade head` against a fresh SQLite DB followed by `alembic revision --autogenerate` producing an empty diff. Device: `push.py:post_heartbeat()` exercised against a local fake backend for the no-retry behaviour, the fail-streak counter, and the `401`-halts-everything path shared with event push.
+
+**Trickles into.** `docs/DATA-CONTRACT.md` (**Device heartbeat**, new section), `raspberry-pi/docs/PROGRESS.md`, `raspberry-pi/docs/TODO.md` (closes the "no liveness without storage" gap), `Dashboard-Detector` `docs/PROGRESS.md`/`docs/TODO.md`, `app/services/silence.py`, `app/routers/data.py`.

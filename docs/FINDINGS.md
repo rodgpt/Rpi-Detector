@@ -447,3 +447,17 @@ D-014 implemented: `oceankind/detectors/` runs an ordered chain, each detection 
 **New empirical evidence for F-21 / client dependency 2 (2026-08-26).** Run against synthetics through the harness, `model.joblib` **fires "blast" on a sustained tonal clip and does not fire on a sub-second impulse** — precisely the behaviour of a model trained on a humming pool filter (`FILTRO`). Until the client retrains on real blasts, the fleet effectively carries two tonal-machinery detectors and no impulse detector beyond the RMS level gate. Raise with the client alongside dependency 3 (labelled audio).
 
 **Operational note.** The bundle was pickled with scikit-learn 1.6.1; newer sklearn loads it with an `InconsistentVersionWarning`. Any unit enabling `ml_mfcc` should pin sklearn ~1.6, or the client re-exports the bundle with the deployed version.
+
+---
+
+## Bench-found, 2026-09-23
+
+### F-25 — WhatsApp heartbeat logged "enviado" for a send that never happened — fixed
+
+`send_whatsapp_heartbeat()` was missing the `TWILIO_CONFIGURED` guard its sibling `send_whatsapp()` already has. `_wa_send()` logs the real failure internally and returns without raising, so the unconditional success log below it ran regardless of whether anything actually sent — found on the bench via `journalctl` showing `WhatsApp NO enviado (sin credenciales Twilio — modo banco)` immediately followed by `→ Heartbeat WhatsApp enviado`, same attempt. Same shape as F-01/F-02: a failed operation reporting itself as succeeded. Cosmetic under `ALLOW_NO_TWILIO=1` (no real recipient expects the message), but the pattern is exactly the one this whole register exists to catch. Fixed with the identical guard `send_whatsapp()` uses. See `raspberry-pi/docs/TODO.md`.
+
+### F-26 — No liveness signal at all for a unit with no storage configured — fixed (D-018)
+
+Silence is the worst failure mode this system has, and this defect meant a unit could hit it and never be noticed. `status.json` was written only to blob storage; a unit provisioned without Azure and without a local storage bridge (an accepted bench configuration, 2026-09-07) never wrote it anywhere at all. Consequence, found by tracing both sides: the dashboard showed nothing for the unit, and — the sharper half — `silence.py`'s device-silence alerting reads `status.json → last_seen` and had no blob to read, so a unit in this state could go dark and the alerting system built specifically to catch that would stay silent about it too.
+
+Fixed by `POST /api/devices/heartbeat` (D-018): the device POSTs the same `status.json` document directly to the backend on every heartbeat, unconditional on storage being configured, with no retry (a stale heartbeat has no recovery value) and backend-enforced monotonicity (a stale or out-of-order POST can never regress what is stored). `GET /api/sites/{site_id}/status` and `silence.py` both now read whichever of blob storage / the direct POST is fresher, so a unit with only one of the two signals is still fully covered. Full detail: `docs/DATA-CONTRACT.md` §Device heartbeat, `DECISIONS.md` D-018.

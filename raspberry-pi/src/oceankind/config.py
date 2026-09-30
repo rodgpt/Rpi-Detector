@@ -140,7 +140,20 @@ AUDIO_SOURCE = os.environ.get("OCEANKIND_AUDIO_SOURCE", "device").strip().lower(
 # Patrones sintéticos implementados. ÚNICA definición: `capture.make_source` la
 # usa para construir la fuente y `validate_startup_config` para rechazar
 # cualquier otra cosa. Con dos listas separadas esto vuelve a divergir.
-SYNTHETIC_PATTERNS = ("tone", "noise", "impulse", "silence")
+#
+# tone/impulse disparan SIEMPRE (cada ventana de 5 s) y noise/silence NUNCA:
+# con una señal sintética constante no hay término medio. "sporadic" es el
+# único que dispara el detector real de vez en cuando — silencio de fondo con
+# ráfagas de tono a intervalos aleatorios, en vez de una señal inyectada que
+# se salta captura/clasificación (ver `tools/inject_event.py`, que hace
+# exactamente eso y es la herramienta correcta cuando lo que se quiere
+# probar es transporte/backend, no el pipeline entero).
+SYNTHETIC_PATTERNS = ("tone", "noise", "impulse", "silence", "sporadic")
+
+# Intervalo medio, en segundos, entre ráfagas del patrón "sporadic". Llegadas
+# tipo Poisson (ver capture.SyntheticSource), así que en una corrida larga se
+# comporta como una tasa fija sin ser un metrónomo. 720 s = 12 min.
+SYNTHETIC_SPORADIC_MEAN_S = float(os.environ.get("OCEANKIND_SYNTHETIC_SPORADIC_MEAN_S", "720"))
 
 
 def synthetic_pattern(source: str | None = None) -> str:
@@ -435,12 +448,19 @@ def validate_startup_config() -> None:
                         "la clave por dispositivo la emite el backend al registrar la unidad.")
     if BACKEND_URL and not BACKEND_URL.startswith(("http://", "https://")):
         problems.append(f"OCEANKIND_BACKEND_URL={BACKEND_URL!r} debe empezar con http:// o https://")
-    if STORAGE_ENABLED:
+    # SITE lo exige CUALQUIERA de los dos destinos, no solo el almacenamiento.
+    # El backend rechaza con 403 todo evento cuyo `site` no coincida con el del
+    # dispositivo registrado, así que en una unidad push-only sin SITE arrancaba
+    # limpia y fallaba TODOS los push. Un aprovisionamiento incompleto no debe
+    # arrancar (R-8.1) en vez de descubrirse evento a evento.
+    if STORAGE_ENABLED or BACKEND_URL:
         if not SITE:
             problems.append("OCEANKIND_SITE falta. En el contrato v2 todo vive bajo "
-                            "sites/{site}/ — definir un id (p.ej. 'punta_norte').")
+                            "sites/{site}/, y el backend rechaza (403) los eventos "
+                            "cuyo site no coincide — definir un id (p.ej. 'punta_norte').")
         elif not SITE_ID_RE.match(SITE):
             problems.append(f"OCEANKIND_SITE={SITE!r} inválido: solo [a-z0-9_-]")
+    if STORAGE_ENABLED:
         if SENSOR_LAT is None or SENSOR_LON is None:
             problems.append("OCEANKIND_SENSOR_LAT / OCEANKIND_SENSOR_LON faltan — "
                             "el registro de sitios (_sites.json) los requiere.")

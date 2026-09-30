@@ -105,14 +105,26 @@ def build_status(session_start: datetime, alert_count: int, last_rms: float,
     }
 
 
-def upload_status(session_start: datetime, alert_count: int, last_rms: float) -> dict:
-    """Recolecta sensores, sube status.json, alimenta el CSV. Devuelve lo
-    recolectado para reuso (heartbeat WhatsApp)."""
+def collect_status(session_start: datetime, alert_count: int, last_rms: float) -> tuple[dict, dict]:
+    """Sensores + status.json v2, en un solo lugar, UNA vez por tick de
+    heartbeat (D-0xx: antes esto vivía dentro de `upload_status`, que solo se
+    llamaba con almacenamiento activo — el POST al backend §Device heartbeat
+    no depende de eso y necesita los mismos datos, así que la recolección se
+    separó de la subida). El resultado se reusa para el POST, el blob (si hay
+    almacenamiento) y el heartbeat de WhatsApp — nunca se recolecta dos veces
+    en el mismo tick."""
     solar = telemetry.fetch_ve_direct()
     modem = telemetry.fetch_modem_signal()
     stats = telemetry.get_system_stats()
     telemetry.check_battery_alert(solar)
     status = build_status(session_start, alert_count, last_rms, solar, modem, stats)
+    return status, {"solar": solar, "modem": modem, "stats": stats}
+
+
+def write_status_blob(status: dict, alert_count: int, last_rms: float) -> None:
+    """El camino durable-pero-opcional (§Device heartbeat: 'blob storage,
+    si hay'). Solo corre con almacenamiento activo; el POST de más abajo no
+    depende de esto en absoluto."""
     storage.upload_json(storage.site_path("status.json"), status)
     log.info("  → status.json (uptime %ds, %d alertas, duty %s%%)",
              status["uptime_seconds"], alert_count,
@@ -122,7 +134,6 @@ def upload_status(session_start: datetime, alert_count: int, last_rms: float) ->
         "alert_count_session": alert_count,
         **status["power"], **status["network"], **status["system"],
     })
-    return {"solar": solar, "modem": modem, "stats": stats}
 
 
 def main() -> None:
@@ -179,14 +190,33 @@ def main() -> None:
 
             if now - last_status >= hb:
                 health.maybe_alert_audio_health()   # R-2.2: hidrófono muerto suena
-                sensors = None
                 push.drain_push_spool()
+
+                # Recolección UNCONDICIONAL — el POST de heartbeat (§Device
+                # heartbeat) no depende de almacenamiento; antes esto entero
+                # vivía dentro de `if C.STORAGE_ENABLED`, que es exactamente
+                # por qué una unidad sin Azure/OUTPUT_DIR nunca mandaba nada
+                # de salud al dashboard (2026-09-23). try/except explícito:
+                # antes esta recolección solo corría DENTRO del try de más
+                # abajo (protegida); ahora corre siempre, así que necesita su
+                # propia protección — un hipo de un sensor (serial VE.Direct,
+                # batería) no puede tumbar captura/clasificación/transporte.
+                status = sensors = None
+                try:
+                    status, sensors = collect_status(session_start, pipe.alert_count, pipe.last_rms)
+                    if push.enabled():
+                        push.post_heartbeat(status)
+                except Exception as exc:
+                    log.warning("  Error recolectando estado/heartbeat: %s", exc)
                 if C.STORAGE_ENABLED:
+                    # Independiente de la recolección de arriba (siempre corría
+                    # así, incluso si upload_status fallaba — no acoplar).
                     storage.drain_event_spool()
-                    try:
-                        sensors = upload_status(session_start, pipe.alert_count, pipe.last_rms)
-                    except Exception as exc:
-                        log.warning("  Error subiendo status.json: %s", exc)
+                    if status is not None:
+                        try:
+                            write_status_blob(status, pipe.alert_count, pipe.last_rms)
+                        except Exception as exc:
+                            log.warning("  Error subiendo status.json: %s", exc)
                 if iot:
                     try:
                         notify.send_iot_message(iot, pipe.last_rms, pipe.last_peak_db,

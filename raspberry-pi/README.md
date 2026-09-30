@@ -39,9 +39,14 @@ The v1 description of this folder — one 1,308-line file, strictly sequential, 
 ## Prove it works
 
 ```bash
+# anywhere with numpy — cepelynvault, or the Pi's venv. NOT the dev Mac,
+# which has no numpy: both of these import the oceankind package.
 python3 tools/v2_conformance_test.py     # drives the real emit code → CONFORMANT
 python3 tools/phase1_smoke_test.py       # fail-loud + signed-config behaviour
+
+# stdlib / bash only — runs anywhere, including the Mac
 bash    tools/ota_rollback_test.sh       # breaks an update on purpose → ALL PASS
+python3 ../tools/validate_contract.py ./out
 
 # on the bench Pi (needs the service venv, not system python3):
 ~/oceankind/venv/bin/python tools/inject_event.py --count 3   # emit events by hand

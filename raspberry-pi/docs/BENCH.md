@@ -23,7 +23,8 @@ themselves — see the gate immediately below.
 >
 > **Full step-by-step to create them:
 > [`../../docs/research/azure-storage-deployment.md`](../../docs/research/azure-storage-deployment.md)**
-> — steps 1 to 4. It takes about 15 minutes and needs `brew install azure-cli`.
+> — steps 1 to 4. About 15 minutes, and needs `azure-cli` on `cepelynvault`
+> (`sudo apt install azure-cli`).
 >
 > Then read **§0.1 Write volume and cost** below *before* you start the soak.
 > A worst-case 24 h run writes far more than the free monthly allowance, and
@@ -59,6 +60,28 @@ Phase 5.
 
 ---
 
+## The three machines
+
+Every command in this file runs on one of these. Where it matters the section
+says which; when in doubt, match the prompt to this table.
+
+| Name | What it is | Its job here |
+|---|---|---|
+| **the Mac** | development machine | Write code. `rsync` and `ssh` into the Pi. Flash the SD card. Run the stdlib-only checks |
+| **`cepelynvault`** | Debian trixie home server | Runs the backend + Postgres, public at `marfutura.buenalynch.com`. Holds `azure-cli`. Run anything needing numpy or `az` here |
+| **`oceankind-bench.local`** | the Pi Zero W v1.1 | The unit under test |
+
+Two consequences that bite if you ignore them:
+
+- **The Mac has no numpy**, so `phase1_smoke_test.py` and
+  `v2_conformance_test.py` cannot run there — they import the `oceankind`
+  package. Run them on `cepelynvault` or on the Pi's venv. Only
+  `validate_contract.py` (stdlib) and `ota_rollback_test.sh` (bash + git) run
+  on the Mac.
+- **`azure-cli` lives on `cepelynvault`**, not the Mac. The verification steps
+  in §5 and §6 that download the blob tree run there:
+  `sudo apt install azure-cli && az login`.
+
 ## Cheat sheet — the commands you will re-run
 
 Everything here assumes `marfutura@oceankind-bench.local` and the paths
@@ -84,33 +107,49 @@ journalctl -u oceankind -f
 journalctl -u oceankind --since "1 hour ago" | grep -iE "error|degrad|deaf"
 ```
 
-**Change the event rate** — `sudo nano /etc/oceankind.env`, one line, then
-restart. There is no events-per-hour setting; see "Controlling the event rate"
-in §4 for why:
+**Change the event rate** — `sudo nano /etc/oceankind.env`, then restart. See
+"Controlling the event rate" in §4 for the reasoning:
 
 ```bash
 OCEANKIND_AUDIO_SOURCE=synthetic:noise   # ~no detections — the quiet baseline
 OCEANKIND_AUDIO_SOURCE=synthetic:tone    # fires every 5 s window, ~17 280/day
+OCEANKIND_AUDIO_SOURCE=synthetic:sporadic          # real detections, spaced out
+OCEANKIND_SYNTHETIC_SPORADIC_MEAN_S=720            # average seconds between them
 ```
 
 **Send events by hand** (works with the quiet baseline — this is how you get a
-controlled cadence):
+controlled cadence). **Needs `sudo`**: `/etc/oceankind.env` is `600`,
+root-owned (`setup.sh` installs it that way) — the script reads it for
+`OCEANKIND_SITE`, the storage/backend destination and the device key, and a
+plain user cannot open it. `sudo` also lets it write into `~/oceankind/out`
+without an ownership fight, since root can write there regardless of who owns
+it:
 
 ```bash
 V=~/oceankind/venv/bin/python
 I=~/Rpi-Detector/raspberry-pi/tools/inject_event.py
 
-$V $I                              # one event, now
-$V $I --count 5 --interval 2       # five, 2 s apart
-$V $I --count 24 --interval 3600   # one an hour for a day (run under tmux)
-$V $I --suppressed                 # the cooldown case: recorded, no clip
-$V $I --dry-run                    # print the JSON, write nothing
+sudo $V $I                              # one event, now
+sudo $V $I --count 5 --interval 2       # five, 2 s apart
+sudo $V $I --count 24 --interval 3600   # one an hour for a day (run under tmux)
+sudo $V $I --suppressed                 # the cooldown case: recorded, no clip
+sudo $V $I --dry-run                    # print the JSON, write nothing
 ```
 
-Or on a schedule — `crontab -e`, hourly:
+Or on a schedule — **root's** crontab, not `marfutura`'s, for the same
+permission reason (`sudo crontab -e` edits root's, plain `crontab -e` edits the
+calling user's and will hit the same `PermissionError`):
 
 ```
 0 * * * * /home/marfutura/oceankind/venv/bin/python /home/marfutura/Rpi-Detector/raspberry-pi/tools/inject_event.py >> /tmp/oceankind/logs/inject.log 2>&1
+```
+
+**Backend push** (see §4b for registering the device and getting a key):
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://marfutura.buenalynch.com/api/devices/events
+# 422 = healthy (endpoint up, headers missing). HTML = a proxy is in the way.
+journalctl -u oceankind -n 30 | grep -i push
 ```
 
 **Read the output** (stdlib only — system `python3` is fine here):
@@ -129,12 +168,16 @@ this is a confirmation, not a trap:
 journalctl -u oceankind | grep "Fuente sintética iniciada"
 ```
 
-**Tests, on the Mac:**
+**Tests.** Mind where each one runs — two of them need numpy:
 
 ```bash
+# on the Mac (stdlib / bash only)
+bash    raspberry-pi/tools/ota_rollback_test.sh     # → ALL PASS
+python3 tools/validate_contract.py ./out            # → CONFORMANT
+
+# on cepelynvault, or the Pi's venv — these import the oceankind package
 python3 raspberry-pi/tools/v2_conformance_test.py   # → CONFORMANT
 python3 raspberry-pi/tools/phase1_smoke_test.py
-bash    raspberry-pi/tools/ota_rollback_test.sh     # → ALL PASS
 ```
 
 ---
@@ -152,8 +195,9 @@ bash    raspberry-pi/tools/ota_rollback_test.sh     # → ALL PASS
   (`EVENT_SPOOL_MAX`, 500) and the oldest are discarded once it fills
 
 **Azure checklist** — all five rows of the gate at the top of this file must be
-done. On the Mac you also need `azure-cli` (`brew install azure-cli`, `az login`)
-for the verification steps in §5 and §6.
+done. On **`cepelynvault`** you also need `azure-cli`
+(`sudo apt install azure-cli`, then `az login`) for the verification steps in
+§5 and §6. Not on the Mac: the Mac's job is code, rsync and ssh.
 
 **Timing.** About 20 minutes of your attention, spread across a 30–60 minute
 provisioning wait, then 24 hours of walking away. Create the Azure resources
@@ -181,10 +225,13 @@ entirely on your account state:
 
 - **Run inside the trial credit window.** Simplest, and the reason to do this
   soak now rather than in a month.
-- **Reduce the load.** Set `OCEANKIND_AUDIO_SOURCE=synthetic:impulse` instead of
-  `tone`. Far fewer detections, so far fewer writes. You keep the transport
-  proof and the memory numbers, but you **lose the worst-case duty cycle** —
-  which is the main thing this soak exists to measure. Say so in the results.
+- **Reduce the load.** `synthetic:impulse` produces **zero** detections against
+  `psd_tonal` (verified — see the table above), so use `synthetic:sporadic`
+  instead if you want *some* real traffic at a chosen rate
+  (`OCEANKIND_SYNTHETIC_SPORADIC_MEAN_S`), or `synthetic:noise` for none at
+  all. Either way you keep the transport proof and the memory numbers, but you
+  **lose the worst-case duty cycle** — which is the main thing this soak
+  exists to measure. Say so in the results.
 - **Split it.** 24 h against `OCEANKIND_OUTPUT_DIR` for the measurements (§4
   option b), then a short tone run against Azure for the transport proof. Costs
   nothing, proves everything, takes one extra hour.
@@ -231,7 +278,8 @@ the repo copy stays production-shaped.
 ## 1. Flash the SD card (on the Mac, ~10 min)
 
 1. Install **Raspberry Pi Imager**: `brew install --cask raspberry-pi-imager`
-   (or download from raspberrypi.com/software). Card: 16 GB minimum, 32 GB fine.
+   (or download from raspberrypi.com/software). On `cepelynvault` instead it is
+   `sudo apt install rpi-imager`. Card: 16 GB minimum, 32 GB fine.
 2. In Imager:
    - **Device**: Raspberry Pi Zero W (or "No filtering")
    - **OS**: Raspberry Pi OS **Lite (32-bit)** — no desktop. **Not 64-bit**:
@@ -321,24 +369,28 @@ OCEANKIND_TWILIO_SID=
 OCEANKIND_TWILIO_TOKEN=
 
 # ── Where the v2 tree goes — pick ONE ─────────────────────────────────────
-# (a) AZURE — the default for this runbook. Paste the connection string from
-#     azure-storage-deployment.md §5. Leave OUTPUT_DIR unset/commented: if BOTH
-#     are set, OUTPUT_DIR wins and nothing reaches Azure (storage.py:60).
-OCEANKIND_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=stoceankinddev01;...
-OCEANKIND_STORAGE_CONTAINER=alerts
-#OCEANKIND_OUTPUT_DIR=
+# (a) LOCAL — the CURRENT bench setup (2026-09-07). Identical tree on the SD
+#     card, no Azure, no cost, nothing to provision. Events still reach the
+#     dashboard over the push path; the audio does not, and clip playback 404s
+#     on purpose. See "No Azure: what you get and what you lose" in §4b.
+OCEANKIND_OUTPUT_DIR=/home/marfutura/oceankind/out
 
-# (b) LOCAL fallback — identical tree on the SD card, no network, no cost.
-#     Use if Azure is not ready, or for the split approach in §0.1.
-#     Comment out the two Azure lines above and uncomment this one:
-#OCEANKIND_OUTPUT_DIR=/home/marfutura/oceankind/out
+# (b) AZURE — when a container exists. Paste the connection string from
+#     azure-storage-deployment.md §5 and COMMENT OUT OUTPUT_DIR above: if both
+#     are set, OUTPUT_DIR wins and nothing reaches Azure (storage.py:60).
+#OCEANKIND_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=…
+#OCEANKIND_STORAGE_CONTAINER=alerts
+
+# Do NOT unset both. Storage off entirely also kills status.json and the
+# rollups, which is where duty_cycle_pct and ram_used_mb live — the verdict of
+# the whole 24 h run. OUTPUT_DIR costs nothing and keeps them readable.
 
 # ── Load ──────────────────────────────────────────────────────────────────
 # Worst case on purpose: the tone pattern makes the detector fire on EVERY window.
 # ~17k event blobs/day — see §0.1 before running this against Azure.
 OCEANKIND_AUDIO_SOURCE=synthetic:tone
 # Too many? Use synthetic:noise instead and inject events on demand:
-#   ~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py --count 3
+#   sudo ~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py --count 3
 # See "Controlling the event rate" below — there is no knob that thins them out.
 # 1 notified event per hour; the rest recorded as suppressed. Cooldown throttles
 # NOTIFICATIONS ONLY — it does not reduce the blob count (D-008, F-03).
@@ -347,8 +399,9 @@ OCEANKIND_ALERT_COOLDOWN_S=3600
 
 ### Controlling the event rate
 
-There is **no events-per-hour setting**, and it is worth understanding why
-before hunting for one.
+There is **no events-per-hour setting** as a threshold or cooldown knob, and
+it is worth understanding why before hunting for one — but there is a source
+pattern built for exactly this, `synthetic:sporadic`, added 2026-09-22.
 
 Capture is continuous and every 5 s window is classified, by design (Phase 2).
 `OCEANKIND_WINDOW_HOP_S` looks like the knob and is not: `capture.py:217`
@@ -361,25 +414,56 @@ whether a clip is carried. Recording every detection is deliberate (D-008,
 F-03): the event record is the scientific evidence of activity, so throttling
 alerts must never throttle data.
 
-So with a constant synthetic signal the levers are all-or-nothing:
+So a *constant* signal really is all-or-nothing:
 
 | Setting | Result |
 |---|---|
 | `synthetic:tone` | fires every window — ~17 280 events/day, ~24 with clips |
 | `synthetic:noise` | broadband, no tonal peaks — effectively no detections |
-| `synthetic:impulse` | a 0.25 s burst per window — still every window |
+| `synthetic:impulse` | **fires nothing** with `psd_tonal` (the only detector active here) — corrected 2026-09-22, verified against the real detector; `psd_tonal.py`'s own F-21 note already said as much: an impulse scores ≤0.2, `score_min` defaults to 0.60. It's built for `ml_mfcc`, which isn't enabled on this bench (`OCEANKIND_DETECTORS` unset) |
 | `OCEANKIND_PSD_THRESHOLD_DB`, `OCEANKIND_ALERT_MIN_RMS` | raise above the signal and *nothing* fires; below and *everything* does |
 
-**The usable bench setup is therefore a quiet source plus events on demand.**
-Run the soak on `synthetic:noise` — that still exercises continuous capture,
-the duty cycle, the health block, telemetry and `status.json`, which is what
-the 24 h run is actually for — and inject events when you want them:
+**`synthetic:sporadic` breaks that by not being constant.** Background noise
+most of the time, with a full tone burst on a randomly chosen 5 s window every
+so often — Poisson arrivals, not a metronome, so the dashboard doesn't show
+suspiciously exact spacing. Every firing goes through the **real** pipeline:
+real capture, real `psd_tonal` classification, real queue, real push. This is
+the tool for proving the unattended pipeline survives over time — capture,
+classify, queue, transport, push, backend, dashboard, all exercised, at a rate
+you choose instead of 17k/day or none.
 
 ```bash
-~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py            # one
-~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py --count 5 --interval 2
-~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py --dry-run  # print, write nothing
+OCEANKIND_AUDIO_SOURCE=synthetic:sporadic
+OCEANKIND_SYNTHETIC_SPORADIC_MEAN_S=720   # average seconds between events; 720 = 12 min
 ```
+
+Mean interval only, not a fixed clock — over a 200 h simulated run at the
+default it landed within 6% of 720 s, which is normal Poisson variance, not
+drift. The decision for a window is made once, at the start of that window,
+and held for its full 5 s, so a firing is never diluted across a boundary the
+way a per-block coin flip would dilute it.
+
+**This is a different tool from `inject_event.py`, for a different question.**
+`inject_event.py` skips capture and classification entirely — it's for testing
+transport and the backend/dashboard in isolation, on demand, with no wait.
+`synthetic:sporadic` is for testing that the *whole* unattended chain keeps
+working by itself, including the parts `inject_event.py` bypasses. Use
+`synthetic:noise` instead (rate zero) if you only want the duty-cycle/health
+baseline with no events at all — that's still the right choice for the
+Phase 2 acceptance soak in §5–6, where events would be noise in the duty-cycle
+signal you're actually trying to measure.
+
+The older, simpler way to get occasional events — `synthetic:noise` plus
+`inject_event.py` on demand or on a cron — still works and is documented
+below; it's lighter weight when you don't need the real detector exercised:
+
+```bash
+sudo ~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py            # one
+sudo ~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py --count 5 --interval 2
+sudo ~/oceankind/venv/bin/python raspberry-pi/tools/inject_event.py --dry-run  # print, write nothing
+```
+
+`sudo` is required — `/etc/oceankind.env` is root-owned and mode `600`.
 
 It goes through `storage.build_event` / `write_event` / `push.push_event` — the
 same functions the transport worker uses — so the blob is contract-identical
@@ -394,6 +478,194 @@ throughput question specifically (§0.1) rather than as the default.
 set *and* filling in the connection string. `storage.py:60` checks `OUTPUT_DIR`
 first, so everything goes to the SD card and Azure stays empty — with no error,
 because nothing failed. Comment it out.
+
+## 4b. Point the unit at the backend (~10 min)
+
+Optional for a storage-only soak; required if you want events in the dashboard
+index as they happen. Skip to §5 if you are only measuring duty cycle.
+
+### What the device actually sends
+
+One POST per event, to `{OCEANKIND_BACKEND_URL}/api/devices/events`, carrying
+two headers and the event document:
+
+```
+POST /api/devices/events
+X-Device-Id:  Rpi_bench          ← literally your OCEANKIND_DEVICE_ID
+X-Device-Key: <the issued key>   ← literally your OCEANKIND_DEVICE_KEY
+Content-Type: application/json
+```
+
+`X-Device-Id` is not a special identifier to look up anywhere: it is the value
+of `OCEANKIND_DEVICE_ID` in `/etc/oceankind.env`, sent as a header so the
+backend can find the matching device record. Think of it as the username and
+`X-Device-Key` as the password. Check what yours is before registering:
+
+```bash
+grep -E "OCEANKIND_(DEVICE_ID|SITE)=" /etc/oceankind.env
+```
+
+The device **never registers itself**. You create the record by hand, once.
+
+### Step 1 — create the site, then the device (in the admin panel)
+
+The backend runs on **`cepelynvault`** and is published at
+`https://marfutura.buenalynch.com`. Use the **public hostname** in the device
+config even though the Pi shares the LAN with `cepelynvault`: it is the only
+address a deployed unit will ever have, so pointing the bench at the LAN name
+leaves TLS and the tunnel — the parts that actually break — untested, and sends
+the device key over cleartext HTTP.
+
+Log in at `https://marfutura.buenalynch.com` as an admin.
+
+1. **Admin → Sitios.** Confirm a site exists whose id is exactly your
+   `OCEANKIND_SITE` (`banco` on the bench). Do this **first**: creating a
+   device for an unregistered site is rejected with
+   `unknown site 'banco'; register the site first`.
+2. **Admin → Dispositivos → create**, with:
+   - **device_id** = your `OCEANKIND_DEVICE_ID`, e.g. `Rpi_bench`
+     (3–64 chars, letters/digits/`_`/`-`)
+   - **site_id** = your `OCEANKIND_SITE`, e.g. `banco`
+3. The panel shows **Identificador** and **Clave** once, with a copy button.
+
+> **Copy the key immediately.** It is generated at creation and stored only as
+> an argon2 hash — there is no way to read it back, by design. If you lose it,
+> delete the device and create it again.
+
+Equivalent by API, if you prefer: `POST /api/admin/devices` with
+`{"device_id": "Rpi_bench", "site_id": "banco"}`, authenticated as an admin via
+`POST /api/auth/login`. The `key` appears in that one response and nowhere else.
+
+### Step 2 — put it in the env file
+
+`sudo nano /etc/oceankind.env`:
+
+```bash
+OCEANKIND_BACKEND_URL=https://marfutura.buenalynch.com
+OCEANKIND_DEVICE_KEY=<the key you just copied>
+```
+
+**Base URL only** — the device appends `/api/devices/events` itself. A URL with
+no key refuses to start (R-8.1); that is deliberate, not a bug.
+
+```bash
+sudo systemctl restart oceankind
+```
+
+### Step 3 — prove it with one event, not with a soak
+
+```bash
+sudo ~/oceankind/venv/bin/python ~/Rpi-Detector/raspberry-pi/tools/inject_event.py --count 1
+journalctl -u oceankind -n 30 | grep -i push
+```
+
+`sudo` is required to read `/etc/oceankind.env` (root-owned, mode `600`) — a
+plain `PermissionError` traceback without it means exactly that, not a bug in
+the tool.
+
+Then check the unit appears in **Admin → Dispositivos** with a fresh
+`last_seen` — the backend stamps it on every authenticated request, so a
+freshly keyed unit that never connected is visible there.
+
+### Verified reachable (probed 2026-09-06)
+
+The backend is live on the public hostname and **not behind Cloudflare
+Access** — responses come from the app as JSON, not a login redirect, so the
+device can POST directly. Behind Cloudflare (`server: cloudflare`,
+`cf-cache-status: DYNAMIC`), but with no policy in the way.
+
+| Probe | Result |
+|---|---|
+| `GET /api/health` | `200` `{"status":"ok","storage":"local"}` |
+| `POST /api/devices/events` (no headers) | `422` — `x-device-key`/`x-device-id` missing |
+| `GET /api/devices/config` (bogus headers) | `401` `invalid device credentials` |
+| `GET /api/sites`, `/api/auth/me`, `/api/admin/devices` | `401` — protected, correct |
+| `GET /` | `200 text/html` — SPA served |
+
+Useful reachability check from the Pi, before involving the service at all:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://marfutura.buenalynch.com/api/devices/events
+```
+
+**`422` is the healthy answer here** — it means the endpoint is present and is
+complaining that the two headers are missing, which they are. `401` means it
+got headers and rejected them. Anything that returns HTML is a proxy or an
+Access policy standing in front of the API, and the device cannot authenticate
+through one: it does a single plain POST with no browser. It would spool and
+retry forever while logging only *"backend inalcanzable"*.
+
+### Reading failures
+
+| Code | Means | Where to fix it |
+|---|---|---|
+| `202` | Indexed, or already was. Re-posting the same `event_id` is also `202` | — |
+| `422` | Headers missing entirely | `OCEANKIND_DEVICE_KEY` unset in the env file |
+| `401` | Id/key pair does not match an **active** device record | Re-check the key, or re-issue the device |
+| `403` | Two different causes — see below | Read the log line, don't assume |
+| `400` | Malformed document, or naive `captured_utc` | A device-side bug — report it |
+| `5xx`/timeout | Backend down or deploying | Nothing. It spools and drains on the next heartbeat |
+
+`401` stops pushing entirely until you restart with a corrected key, and shows
+up in `health.degraded_reason` — a revoked device that silently stopped
+reporting is indistinguishable from a dead one.
+
+**A `403` is not always a site mismatch — a `403` can come from Cloudflare
+itself, before your request ever reaches the backend.** Found and fixed
+2026-09-22, cost a long debugging session because it's genuinely
+indistinguishable without the fix: `push.py` used to log a fixed guess
+("site no coincide…") for *every* `403`, whatever produced it. Cloudflare Bot
+Fight Mode blocks Python's default `urllib` User-Agent (`Python-urllib/3.x`)
+at the edge — same status code, completely different cause, and the real
+backend's access log shows **nothing at all**, because the request never
+arrived. That absence is the tell: if `docker compose logs backend` on
+`cepelynvault` has no matching line for a push the device reports as
+rejected, it never reached the app.
+
+`push.py` now sends an explicit `User-Agent: oceankind-device/<version>`
+(sidesteps the block) and logs the **real response body** on every
+`400`/`401`/`403`/`5xx`, not a canned guess. A genuine site mismatch reads
+`{"detail":"site mismatch: document says …, device is registered to …"}` —
+JSON, from the app. A Cloudflare block reads `error code: 1010` — plain text,
+no `cf-cache-status` header, and the app never saw it. If you ever see the
+second shape again (a different WAF rule, a new default library User-Agent),
+the fix is the same: give the request a real `User-Agent` and read what
+actually comes back before trusting any code-to-cause mapping, including the
+table above.
+
+### No Azure: what you get and what you lose
+
+**Decided 2026-09-07.** There is no Azure container and none is being created
+for the bench. The device writes its tree to the SD card and pushes events to
+the backend. Audio is deliberately abandoned — clip playback in the dashboard
+404s and that is the accepted outcome, not a bug to chase.
+
+| | Where it goes | Dashboard sees it |
+|---|---|---|
+| Events | Postgres, via `POST /api/devices/events` | **Yes** — this is the point |
+| Clips (WAV) | Pi's SD card only | **No.** 404 by design |
+| `status.json`, rollups | Pi's SD card only | No — read them on the Pi |
+
+`/api/health` reports `storage: "local"`, so the backend reads blobs from its
+own filesystem on `cepelynvault` and can never see the Pi's SD card. Nothing
+bridges the two, by choice.
+
+Two consequences to hold on to, because they are easy to forget later:
+
+- **The push is now the only path.** The contract's durable path
+  (`device → blob → backend`) does not exist here, so an event rejected at the
+  endpoint or dropped from a full spool is simply gone. `DATA-CONTRACT.md`
+  names this exact shape under **The invariant**: a backend whose reconcile
+  pass has no shared storage compares its index to itself and reports green.
+  Acceptable on a bench, not in production.
+- **The soak verdict is read on the Pi, not in the dashboard.**
+  `duty_cycle_pct`, `ram_used_mb` and the drop counters live in `status.json`,
+  which never leaves the SD card. §6 option (b) is now the only way to read it.
+
+Before any of this is production, one of two things has to happen: point both
+the device and `cepelynvault` at the same Azure container, or record explicitly
+that the index is the sole copy and drop the reconcile guarantee. Tracked in
+`TODO.md`.
 
 ## 5. Smoke-check, then start the soak (~10 min)
 
@@ -411,8 +683,8 @@ There must be **no** `Error subiendo …` lines. If uploads are failing you will
 see those plus `evento encolado localmente` — stop and fix it before soaking,
 because 24 hours of spooling proves nothing about transport.
 
-Sanity-check what actually reached Azure. Run this **on the Mac** (the Pi has no
-`az` CLI), from the repo root:
+Sanity-check what actually reached Azure. Run this **on `cepelynvault`** (that
+is where `azure-cli` lives; the Pi has none), from a checkout of this repo:
 
 ```bash
 KEY=$(az storage account keys list -g rg-oceankind-dev -n stoceankinddev01 --query "[0].value" -o tsv)
@@ -436,7 +708,7 @@ If that looks right: walk away. Leave it running 24 hours.
 
 ## 6. Read the verdict (after 24 h)
 
-Pull the day's tree down and read it, **on the Mac**:
+Pull the day's tree down and read it, **on `cepelynvault`**:
 
 ```bash
 KEY=$(az storage account keys list -g rg-oceankind-dev -n stoceankinddev01 --query "[0].value" -o tsv)
