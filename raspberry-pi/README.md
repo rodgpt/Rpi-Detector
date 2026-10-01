@@ -27,7 +27,7 @@ raspberry-pi/
 ├── scripts/                     setup.sh (fixed, F-11), protect_sd.sh, update_oceankind.sh (no rollback — Phase 5)
 ├── tools/                       workstation-only: v2_conformance_test.py, phase1_smoke_test.py, predict.py
 ├── requirements.txt             real dependencies of the package (F-11 fixed)
-└── docs/                        ARCHITECTURE, HARDWARE, PROGRESS, TODO, BENCH
+└── docs/                        ARCHITECTURE, HARDWARE, PROGRESS, TODO, BENCH, OTA-FAULT-TESTING
 ```
 
 ## What it does
@@ -46,6 +46,8 @@ python3 tools/phase1_smoke_test.py       # fail-loud + signed-config behaviour
 
 # stdlib / bash only — runs anywhere, including the Mac
 bash    tools/ota_rollback_test.sh       # breaks an update on purpose → ALL PASS
+bash    tools/ota_fault_test.sh          # cuts the OTA at every step (power, network, twice) → ALL PASS
+
 python3 ../tools/validate_contract.py ./out
 
 # on the bench Pi (needs the service venv, not system python3):

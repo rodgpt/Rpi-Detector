@@ -173,6 +173,7 @@ journalctl -u oceankind | grep "Fuente sintética iniciada"
 ```bash
 # on the Mac (stdlib / bash only)
 bash    raspberry-pi/tools/ota_rollback_test.sh     # → ALL PASS
+bash    raspberry-pi/tools/ota_fault_test.sh        # → ALL PASS (OTA cut at every step; ~15 min)
 python3 tools/validate_contract.py ./out            # → CONFORMANT
 
 # on cepelynvault, or the Pi's venv — these import the oceankind package

@@ -15,7 +15,10 @@
 #
 # NOTA: Con overlay activo, los cambios al filesystem se pierden al reiniciar.
 #       Las actualizaciones OTA usan update_oceankind.sh que deshabilita
-#       el overlay temporalmente para persistir los cambios.
+#       el overlay temporalmente para persistir los cambios: reinicia con el
+#       overlay OFF, oceankind-ota-boot.service ejecuta la actualización y
+#       vuelve a habilitarlo (ver la cabecera de update_oceankind.sh).
+#       Para trabajo manual con el overlay OFF: touch ~/oceankind/.hold_maintenance
 # =============================================================================
 
 set -e
@@ -122,6 +125,21 @@ echo "[4/5] Habilitando boot partition read-only..."
 raspi-config nonint do_boot_ro 0 2>/dev/null || true
 echo "    ✓ /boot configurado como read-only"
 
+# ── 6b. Marca de unidad protegida + unidad de arranque de la OTA ─────────────
+# .sd_protection le dice a update_oceankind.sh que, si arranca con el overlay
+# DESACTIVADO, es una ventana de mantenimiento y debe re-habilitarlo al
+# terminar. Se escribe AHORA, con la raíz aún escribible: con el overlay activo
+# cualquier fichero nuevo se pierde al reiniciar.
+if [ ! -f /etc/systemd/system/oceankind-ota-boot.service ]; then
+    echo "ERROR: falta oceankind-ota-boot.service (lo instala setup.sh)."
+    echo "       Sin él, una OTA desactivaría el overlay y nadie lo volvería a activar."
+    echo "       Re-ejecuta setup.sh antes de proteger la SD."
+    exit 1
+fi
+touch "${OCEANKIND_DIR}/.sd_protection"
+chown "${SERVICE_USER}:${SERVICE_USER}" "${OCEANKIND_DIR}/.sd_protection"
+echo "    ✓ ${OCEANKIND_DIR}/.sd_protection creada"
+
 # ── 7. Habilitar overlay filesystem ─────────────────────────────────────────
 echo "[5/5] Habilitando overlay filesystem..."
 raspi-config nonint do_overlayfs 0
@@ -146,8 +164,11 @@ echo "    bash ~/oceankind/update_oceankind.sh"
 echo "    (deshabilita overlay, actualiza, y lo re-habilita)"
 echo ""
 echo "  • Para acceso manual de escritura:"
+echo "    touch ~/oceankind/.hold_maintenance   ← si no, la unidad re-habilita"
+echo "                                            el overlay sola al arrancar"
 echo "    sudo raspi-config nonint do_overlayfs 1"
 echo "    sudo reboot   ← luego de los cambios:"
+echo "    rm ~/oceankind/.hold_maintenance"
 echo "    sudo raspi-config nonint do_overlayfs 0 && sudo reboot"
 echo ""
 echo "  Reinicia ahora: sudo reboot"

@@ -61,6 +61,8 @@ Domain-only choices that affect nothing outside their folder can live in that fo
 
 Whole-root overlayfs as today. Simplest, already working, but every persistent write needs a deliberate escape hatch and the OTA process has to disable and re-enable it, which is the two-reboot dance that can strand the node.
 
+**Update 2026-09-30.** The stranding risk cited above is no longer theoretical — fault injection (`tools/ota_fault_test.sh`) reproduced it, and found it was unrecoverable with the original design: the phase-1 flag and its one-shot reboot unit were both written while the overlay was still on, so the very reboot meant to carry them to phase 2 discarded them, leaving the overlay off permanently. The redesign (`raspberry-pi/docs/ARCHITECTURE.md` §Filesystem strategy) removes the reboot-surviving flag rather than fixing it: a permanent boot-time unit now re-derives "mid-maintenance" from state that is itself persistent (the overlay's live mount status plus a marker written before the overlay is ever enabled), and the window always re-enables the overlay on exit regardless of outcome. This closes the specific stranding failure mode under workstation fault injection, not the decision itself — whole-root overlay vs. a dedicated writable partition vs. write-discipline is still open, and real-hardware proof of the fix is still pending (`docs/OTA-FAULT-TESTING.md` §5).
+
 A dedicated writable partition with a read-only root. More setup, but telemetry and state get a real home, and the OTA process no longer has to toggle anything.
 
 Read-write root with aggressive write minimisation. Simplest mentally, relies entirely on discipline, and one careless log line degrades the card.

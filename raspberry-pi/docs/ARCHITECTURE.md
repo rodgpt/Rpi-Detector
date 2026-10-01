@@ -130,6 +130,19 @@ The tmpfiles rule has `-` in the age field, so systemd creates the directory and
 
 Three rules regardless of how D-002 lands. Nothing writes to `/boot/firmware`. Everything written to a RAM-backed path is deleted on every code path including error paths. Anything that must survive a reboot goes to a deliberately chosen persistent location, not wherever the code happens to be pointing.
 
+### The overlay maintenance window (redesigned 2026-09-30)
+
+An OTA on an overlay unit still needs the overlay off to write anything that must survive — that constraint didn't change. What changed is where the state tracking that constraint lives, after fault injection (`tools/ota_fault_test.sh`, F-27) found the original two-phase handoff could never actually complete: the phase-1 flag and its one-shot systemd unit were both *written while the overlay was still on*, so they landed on the RAM upper layer and were discarded by the very reboot meant to carry them to phase 2 — the overlay went off and silently never came back on.
+
+The fix removes the reboot-surviving flag entirely rather than trying to make one survive. `oceankind-ota-boot.service` is a permanent unit, written once by `setup.sh` to the real (not overlaid) root, that runs `update_oceankind.sh --boot` on **every** boot via `oneshot`/`multi-user.target`. What it does depends only on state that is itself persistent and readable fresh each time:
+
+- `overlay_active()` checks the live mount (`findmnt -o FSTYPE /`, falling back to `/proc/cmdline`) — the actual current state, not `raspi-config`'s configured-for-next-boot value, because toggling that config only takes effect after a reboot that hasn't happened yet.
+- `.sd_protection` — a marker `protect_sd.sh` writes once, while root is still writable, before it ever enables the overlay. `protect_sd.sh` now refuses to enable the overlay at all if `oceankind-ota-boot.service` isn't already installed, rather than protecting a unit with no way to recover.
+
+So "we are mid-maintenance" is never a flag that has to survive a reboot — it's the overlay being off *and* `.sd_protection` existing, both true before the reboot and both still true after. On a normal protected boot (overlay on) the boot unit's only job is a cheap journal check (below) and it exits. Cron-side, `ota_phase1()` disables the overlay and reboots only when a non-blacklisted target SHA is actually found. The maintenance window is bounded to `OCEANKIND_OTA_MAX_MAINT` boots (default 3, `.ota_attempts`) and **always** re-enables the overlay on the way out via `finish_maintenance()` — whether the update succeeded, failed, or the attempt budget ran out — so an update that is taking too long leaves the SD protected rather than exposed. `touch ~/oceankind/.hold_maintenance` is the manual override for deliberate overlay-off work.
+
+**The update itself is now journaled and locally reversible.** `~/oceankind/.ota_journal` holds one of `installing` / `verifying` / `rollingback`, written atomically (temp file + `sync` + rename + `sync`) at each phase of `deploy()`/`rollback()` in `update_oceankind.sh`; its absence means the tree is settled, its presence is the sole signal of a half-finished update, checked by `oceankind-ota-boot.service` on every boot regardless of overlay state. Before anything is touched, `deploy()` takes a full local snapshot of the current install (`~/oceankind/.snapshot/`, finalised with its own atomic rename) — rollback restores from that snapshot with no git or network call, which is what makes recovery possible even mid-outage. `.installed_sha` is written only after `restart_and_verify()` succeeds, never before, so a build that never got verified can never be recorded as current. A single `mkdir`-based lock (`$RUN_DIR/ota.lock`, PID-checked and self-clearing if the owning process is dead) keeps two updaters from running at once. Full fault-injection campaign and remaining hardware-only gaps: `docs/OTA-FAULT-TESTING.md`.
+
 ---
 
 ## Error handling and recovery
@@ -144,7 +157,7 @@ Status after Phase 1 (2026-08-12):
 | Capture device vanishes | Warn and retry the same dead index (F-15); `audio_ok: false` + alarm after the health window | Re-detect by name (Phase 2) |
 | Process hangs without crashing | **Fixed 2026-08-26 (R-2.7):** systemd `WatchdogSec=120` + pings gated on thread heartbeats — a hung main/classify/transport thread starves the ping and systemd restarts the service. Deliberate boundary: degraded-but-running states (dead hydrophone, network down) do NOT restart — they fail loud instead; a restart loop would mask them. A stalled capture *callback* reaches the fail-loud path (duty/audio_ok), not the watchdog | — |
 | Upload fails after notify (F-13) | **Fixed:** upload first, `clip_uploaded` recorded truthfully, no dead links | — |
-| Bad update | Node unreachable (F-06) | A/B, health check, auto-revert (Phase 5) |
+| Bad update | **Fixed, 2026-09-04 then hardened 2026-09-30 (F-06, F-27):** journaled install, local snapshot, post-restart health gate, boot-time recovery. `tools/ota_fault_test.sh` cuts the real script at every command boundary (power/network, single and double faults) — 0 violations after the rewrite | Proof on real hardware: passwordless sudo from the boot unit, the real overlay and power-cut campaign (`docs/OTA-FAULT-TESTING.md` §5) |
 | Archive queue backs up | **Fixed:** bounded at 300, drops counted in `health.clips_dropped` | Capture/transport queues arrive with Phase 2 |
 
 The old `_load_ml_model` stub (which cached its own failure for the life of the process) is deleted; classification failures are now counted per clip and retried on the next one, with the alarm firing at three consecutive failures.
@@ -162,8 +175,8 @@ The old `_load_ml_model` stub (which cached its own failure for the life of the 
 ### Whole-root overlay for SD protection
 
 **Context.** SD cards die from write cycles and corrupt on power loss. Remote solar node.
-**Tradeoff given up.** Persistence, and a simple update path. The OTA process has to disable and re-enable the overlay, which is the two-reboot dance that can strand the node.
-**Status.** Under review. See D-002.
+**Tradeoff given up.** Persistence, and a simple update path. The OTA process has to disable and re-enable the overlay, which was a two-reboot dance that could strand the node — and did, in testing, until the 2026-09-30 redesign (see **The overlay maintenance window**, above): the window is now bounded, state lives off the overlay rather than on it, and the overlay is always re-enabled on the way out regardless of outcome.
+**Status.** The stranding risk this entry originally flagged is mitigated on a workstation harness; real-hardware proof is still open. The broader choice of filesystem strategy (this overlay vs. a dedicated writable partition vs. discipline) is unchanged and still open. See D-002.
 
 ### ML classifier over STA/LTA
 

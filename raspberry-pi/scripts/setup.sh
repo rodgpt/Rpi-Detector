@@ -212,9 +212,35 @@ ENV_EOF
     echo "Environment template written to /etc/oceankind.env — FILL IT IN before starting."
 fi
 
+# ── 7b. OTA boot unit ─────────────────────────────────────────────────────────
+# Permanent — installed here, while the root is still writable, so it survives
+# the RAM overlay. Runs `update_oceankind.sh --boot` on EVERY boot: it repairs an
+# OTA that was cut short (power, kernel) and, on an SD-protected unit, runs the
+# maintenance window and re-enables the overlay afterwards. Without it the OTA
+# script refuses to disable the overlay: nobody would turn it back on.
+cat > /etc/systemd/system/oceankind-ota-boot.service << BOOT_EOF
+[Unit]
+Description=OceanKind OTA recovery / maintenance window (at boot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=${SERVICE_USER}
+# Verifies for SETTLE_S and may roll back, so it takes minutes, not seconds.
+TimeoutStartSec=1200
+ExecStart=/bin/bash ${OCEANKIND_DIR}/update_oceankind.sh --boot
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+BOOT_EOF
+
 # ── 8. Enable service ─────────────────────────────────────────────────────────
 systemctl daemon-reload
 systemctl enable oceankind
+systemctl enable oceankind-ota-boot
 
 echo ""
 echo "======================================================"

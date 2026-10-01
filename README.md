@@ -51,6 +51,7 @@ Two sites are live: Zapallar and Matanzas. They may be running different builds.
 ├── REQUIREMENTS.md          what this must do, numbered and testable
 ├── CLAUDE.md                rules for AI assistants. read before writing code
 ├── DECISIONS.md             stack-wide decisions, feeds both repositories
+├── QUICKGUIDE.md            add a new unit, end to end: flash, register, provision, verify
 ├── raspberry-pi/
 │   ├── src/                 the production system
 │   ├── models/              model.joblib (orphaned, see F-24)

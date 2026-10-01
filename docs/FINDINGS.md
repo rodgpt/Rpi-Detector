@@ -461,3 +461,21 @@ D-014 implemented: `oceankind/detectors/` runs an ordered chain, each detection 
 Silence is the worst failure mode this system has, and this defect meant a unit could hit it and never be noticed. `status.json` was written only to blob storage; a unit provisioned without Azure and without a local storage bridge (an accepted bench configuration, 2026-09-07) never wrote it anywhere at all. Consequence, found by tracing both sides: the dashboard showed nothing for the unit, and — the sharper half — `silence.py`'s device-silence alerting reads `status.json → last_seen` and had no blob to read, so a unit in this state could go dark and the alerting system built specifically to catch that would stay silent about it too.
 
 Fixed by `POST /api/devices/heartbeat` (D-018): the device POSTs the same `status.json` document directly to the backend on every heartbeat, unconditional on storage being configured, with no retry (a stale heartbeat has no recovery value) and backend-enforced monotonicity (a stale or out-of-order POST can never regress what is stored). `GET /api/sites/{site_id}/status` and `silence.py` both now read whichever of blob storage / the direct POST is fresher, so a unit with only one of the two signals is still fully covered. Full detail: `docs/DATA-CONTRACT.md` §Device heartbeat, `DECISIONS.md` D-018.
+
+---
+
+## Found by fault injection, 2026-09-30
+
+### F-27 — The OTA could be cut short into a permanently bad or unprotected unit — fixed in code, unproven on hardware
+
+`tools/ota_fault_test.sh` cuts the real `update_oceankind.sh` at every command boundary (power and network, singly and twice) and checks the unit afterwards. The script that shipped on 2026-09-04 failed 27 of 40 cut points on a root-writable unit and 12–14 of 18 on an overlay unit. Nine defects; the ones that matter, in order:
+
+1. **A bad build could become permanent.** `.installed_sha` was written before verification, so power lost during the 60 s settle window left a poisoned build installed *and recorded as current*. Every later run said "already up to date". Silent-deaf shaped: the unit crash-loops and nothing ever retries.
+2. **The install was not atomic** (`rm -rf` the package, then `cp -R`): a cut between them left no package, repaired by nothing until the next cron.
+3. **`set -e` protected nothing.** It is disabled inside functions called from `||`/`if`; pip, cp and git failures were swallowed and the script printed `✓ Actualización completada`.
+4. An infrastructure failure (disk full, no network) blacklisted a good commit in `.ota_failed_sha` forever.
+5. A corrupt git object or stale `index.lock` disabled OTA permanently; two updaters could run concurrently.
+6. Rollback needed the network (`git` + `pip`) — worked only because (3) hid pip's failure.
+7. The overlay two-phase handoff wrote its flag and one-shot unit to the RAM overlay, which the requested reboot discards: phase 2 never ran and the overlay stayed **OFF** — SD unprotected, silently.
+
+Fix: journal (`installing → verifying → rollingback`, atomic writes) + local snapshot (rollback needs no network) + `.installed_sha` only on confirmation + boot-time recovery (`oceankind-ota-boot.service`, installed by `setup.sh`) + explicit error handling + single-instance lock + a maintenance window driven by the overlay state itself (`.sd_protection`), bounded to three boots and always ending with the overlay re-enabled. The script refuses to disable the overlay on a unit that lacks the boot unit. After the fix: 0 violations across every single cut and every double cut, and the harness fails when any of these defects is reintroduced. **Not closed:** torn writes and the overlay path on real hardware — `raspberry-pi/docs/OTA-FAULT-TESTING.md` §5. Deployed units need a one-time hands-on step to take the new script.
