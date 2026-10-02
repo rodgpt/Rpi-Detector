@@ -15,7 +15,7 @@
      │    [Bias-T Circuit]  ←──── RG59 Coax ←── [Aquarian H5 Hydrophone #2]
      │          │ (AC audio out)
      │          ▼
-     │    [HifiBerry ADC Pro HAT]
+     │    [Raspberry Pi Codec Zero]
      │          │ (I2S)
      │          ▼
      ├──→ [Raspberry Pi 4 Model B]
@@ -33,7 +33,7 @@
 | Component | Model | Notes |
 |-----------|-------|-------|
 | Single-board computer | Raspberry Pi 4 Model B (2GB+) | Main processor |
-| Audio input HAT | HifiBerry DAC+ ADC Pro | Stereo 24-bit 192kHz I2S input |
+| Audio input HAT | Raspberry Pi Codec Zero | Stereo 24-bit I2S, 8–96 kHz. Zero-form-factor pHAT — pairs naturally with the Zero 2W bench unit, and fits a Pi 4's 40-pin header the same way |
 | Hydrophone × 2 | Aquarian H5 | RG59 coax, internal preamp, needs 9–12V bias |
 | Boost converter | MT3608 module | In: 12V, Out: 9V regulated, ~$1–2 |
 | Solar charge controller | Any PWM or MPPT, 10A+ | 12V system |
@@ -64,7 +64,7 @@ The audio signal rides on top of this DC — the Bias-T separates them.
                      C2    GND (RG59 shield)
                     (100nF)
                       │
-                      └──────→ AUDIO OUT (to HifiBerry ADC Pro RCA input)
+                      └──────→ AUDIO OUT (to Codec Zero AUX IN)
 ```
 
 ### Component values
@@ -89,20 +89,19 @@ Use an MT3608 boost converter module (widely available, < $2):
 
 ---
 
-## HifiBerry ADC Pro — Connection
+## Raspberry Pi Codec Zero — Connection
 
-The HifiBerry DAC+ ADC Pro has RCA (cinch) input connectors.
+**D-009, decided 2026-10-01:** Codec Zero is the project's ADC — HifiBerry DAC+ ADC Pro was an earlier, never-confirmed assumption in this doc and in `setup.sh`; both now say Codec Zero.
 
-Connect the audio output of each Bias-T circuit to one RCA input:
-- Hydrophone #1 Bias-T audio out → Left RCA (channel 0 in software)
-- Hydrophone #2 Bias-T audio out → Right RCA (channel 1 in software)
+The Codec Zero is a HAT: it stacks directly onto the Pi's 40-pin GPIO header, same as the HifiBerry did, with no soldering and no jumper cables for the HAT connection itself — confirmed on the client's own unit. Its stereo line-level input ("AUX IN") is an RCA socket pair on the board itself, the same role the HifiBerry's RCA jacks played, so the Bias-T circuit connects the same way it always did:
+- Hydrophone #1 Bias-T audio out → AUX IN left (channel 0 in software)
+- Hydrophone #2 Bias-T audio out → AUX IN right (channel 1 in software)
 
-The HifiBerry stacks directly onto the Pi 4 GPIO header.
-No soldering needed for the HAT — only the Bias-T circuit requires soldering.
+Only the Bias-T circuit itself requires soldering — same as before, unrelated to which ADC board it feeds into.
 
 ### Raspberry Pi /boot/config.txt (done automatically by setup.sh)
 ```
-dtoverlay=hifiberry-dacplusadcpro
+dtoverlay=rpi-codeczero
 # dtparam=audio=on   ← must be disabled
 ```
 
@@ -113,7 +112,7 @@ dtoverlay=hifiberry-dacplusadcpro
 | Component | Current draw |
 |-----------|-------------|
 | Raspberry Pi 4 (idle, detection running) | ~600 mA @ 5V = 3.0 W |
-| HifiBerry ADC Pro | ~50 mA @ 5V = 0.25 W |
+| Codec Zero | Not yet measured on this board — was ~50 mA @ 5V (0.25 W) for the HifiBerry it replaces; similar order expected, confirm by measurement |
 | 2× Aquarian H5 (biased) | ~20 mA @ 9V = 0.18 W |
 | MT3608 boost (losses ~10%) | +0.02 W |
 | **Total** | **~3.5 W** |

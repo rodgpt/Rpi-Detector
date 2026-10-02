@@ -53,23 +53,23 @@ echo "BLAS provider: ${BLAS_PKG}"
 apt-get install -y python3-pip python3-venv alsa-utils "$BLAS_PKG" libportaudio2 git
 
 # ── 2. Audio HAT overlay ──────────────────────────────────────────────────────
-# D-009: which ADC is actually installed (HifiBerry DAC+ ADC Pro vs Codec Zero)
-# is UNCONFIRMED. This assumes HifiBerry, matching the deployed units' config.
-# If the bench unit has a different HAT, adjust before rebooting.
+# D-009 DECIDED 2026-10-01: Raspberry Pi Codec Zero is the project's ADC.
+# (Previously HifiBerry DAC+ ADC Pro was assumed here; that was never
+# confirmed on a real unit and the client has since settled on Codec Zero.)
 CONFIG_FILE="/boot/firmware/config.txt"
 [ -f "$CONFIG_FILE" ] || CONFIG_FILE="/boot/config.txt"   # pre-bookworm fallback
 
-if ! grep -q "hifiberry-dacplusadcpro" "$CONFIG_FILE"; then
+if ! grep -q "rpi-codeczero" "$CONFIG_FILE"; then
     {
         echo ""
-        echo "# HifiBerry ADC Pro (see D-009 if this is not the installed HAT)"
-        echo "dtoverlay=hifiberry-dacplusadcpro"
+        echo "# Raspberry Pi Codec Zero (D-009)"
+        echo "dtoverlay=rpi-codeczero"
     } >> "$CONFIG_FILE"
-    echo "Added HifiBerry overlay to $CONFIG_FILE"
+    echo "Added Codec Zero overlay to $CONFIG_FILE"
 else
-    echo "HifiBerry overlay already in $CONFIG_FILE"
+    echo "Codec Zero overlay already in $CONFIG_FILE"
 fi
-sed -i 's/^dtparam=audio=on/#dtparam=audio=on  # disabled for HifiBerry/' "$CONFIG_FILE"
+sed -i 's/^dtparam=audio=on/#dtparam=audio=on  # disabled for Codec Zero/' "$CONFIG_FILE"
 
 # ── 3. Project directory ──────────────────────────────────────────────────────
 mkdir -p "${OCEANKIND_DIR}/logs" "${OCEANKIND_DIR}/clips"
@@ -196,7 +196,7 @@ OCEANKIND_TWILIO_TO=
 # OCEANKIND_CALL_TO=
 
 # ── Audio (continuous capture; device matched BY NAME, never by index) ──
-# OCEANKIND_AUDIO_DEVICE_NAME=hifiberry,sndrpihifiberry,dacplusadc,codec
+# OCEANKIND_AUDIO_DEVICE_NAME=codec,sndrpicodeczero,hifiberry,sndrpihifiberry,dacplusadc
 # OCEANKIND_AUDIO_SOURCE=device       # or synthetic:tone for a bench without hydrophone
 
 # ── Detection (defaults are sane; remotely tunable via remote_config.json) ──

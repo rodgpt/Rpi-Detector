@@ -24,7 +24,7 @@ Domain-only choices that affect nothing outside their folder can live in that fo
 | D-006 | PROPOSED | Capture mechanism for the async pipeline | Phase 1 core work |
 | D-007 | DECIDED | Multi-device blob layout — device side implemented via D-016 | Dashboard v2 reader |
 | D-008 | DECIDED | What happens to cooldown-suppressed detections | Detection semantics |
-| D-009 | BLOCKED | Which ADC is actually installed | Any hardware change |
+| D-009 | DECIDED | Raspberry Pi Codec Zero is the project's ADC | HARDWARE.md, setup.sh, D-011 |
 | D-010 | BLOCKED | Which user the service runs as | Provisioning, F-03 severity |
 | D-011 | DEFERRED | Compute platform migration | Nothing yet |
 | D-012 | OPEN | Documentation language | All future docs |
@@ -185,15 +185,19 @@ Nothing here reopens for the device unless the dashboard asks it to write a fiel
 
 ## D-009 — Which ADC is actually installed
 
-**Status:** BLOCKED on field confirmation
+**Status:** DECIDED, 2026-10-01 (client)
 
-**Context.** The code references a HifiBerry DAC+ ADC Pro. A separate system diagram shows a Raspberry Pi Codec Zero. Both prior reports flag the contradiction and neither resolves it.
+**Context.** The code referenced a HifiBerry DAC+ ADC Pro. A separate system diagram showed a Raspberry Pi Codec Zero. Both prior reports flagged the contradiction and neither resolved it.
 
 **Why it matters.** Capture quality determines whether distant, heavily attenuated blasts are detectable at all, and it constrains any future board change. `docs/IMPROVEMENT_REPORT.md` §2.5 argues ADC quality matters more than compute for detection range.
 
-**What is needed.** Someone with physical or SSH access runs `aplay -l` and `arecord -l` on the unit and reports the card name.
+**Decision.** Raspberry Pi Codec Zero is the project's ADC, going forward. The client has a Pi Zero 2W unit running it already — that is a working reference, not a hypothetical. It is a Zero-form-factor pHAT but uses the standard 40-pin header, so it is not tied to the Zero 2W specifically; it fits a Pi 4 the same way.
 
-**Trickles into.** `raspberry-pi/docs/HARDWARE.md`, D-011.
+**This was a client decision, not a device-side SSH confirmation.** `arecord -l` against the actually-deployed Zapallar/Matanzas units (the original "what is needed," still a line in `docs/CLIENT-DEPENDENCIES.md`'s field-facts table) is still worth doing opportunistically, but is no longer blocking anything — the project standardises on Codec Zero regardless of what those two specific units turn out to be running.
+
+**What changed.** `dtoverlay=hifiberry-dacplusadcpro` → `dtoverlay=rpi-codeczero` in `setup.sh`; `AUDIO_DEVICE_NAME`'s by-name hints (F-15) now lead with `codec`/`sndrpicodeczero` rather than the HifiBerry strings (both still present, since matching is substring-based and order doesn't affect it); `raspberry-pi/docs/HARDWARE.md`'s wiring section rewritten for Codec Zero's AUX IN RCA input in place of HifiBerry's — same HAT-on-GPIO-header mechanism, no soldering beyond the Bias-T circuit itself, confirmed on the client's own working unit.
+
+**Trickles into.** `raspberry-pi/docs/HARDWARE.md`, `raspberry-pi/scripts/setup.sh`, `raspberry-pi/src/oceankind/config.py`, `README.md`, `docs/CLIENT-DEPENDENCIES.md`, D-011.
 
 ---
 

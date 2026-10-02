@@ -67,7 +67,7 @@ We cannot physically reach the units, so these need someone who can, or SSH acce
 | Which code is actually running, per unit | `md5sum ~/oceankind/code/marfutura_iot_audio.py` | Whether the tree we have matches either device |
 | Python version on each unit | `python3 --version` | The bytecode shows 3.14 development against a likely 3.10 field runtime |
 | Service user and entry point | `systemctl cat oceankind` | D-010, F-17 |
-| Which ADC is installed | `arecord -l` | D-009. HifiBerry or Codec Zero, the docs disagree |
+| Which ADC is installed on Zapallar/Matanzas specifically | `arecord -l` | D-009 decided 2026-10-01 (Codec Zero) by client direction for the project going forward; this row is only about confirming the two already-deployed units match, no longer blocking |
 | Is the overlay filesystem on | `raspi-config nonint get_overlayfs` | D-002, F-16, and whether F-22 is urgent |
 | Is OTA automatic | `crontab -l && sudo crontab -l` | Whether pushing to main deploys itself at 03:00 |
 | What does the Pi actually pull from | `cd ~/oceankind/code && git remote -v` | The deployment source is still unknown |

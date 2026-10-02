@@ -33,7 +33,7 @@ python3 tools/validate_contract.py ./out
 | Board | Raspberry Pi 4 Model B, 2 GB |
 | Bench unit | Raspberry Pi Zero 2W, **512 MB** |
 | OS | Raspberry Pi OS, overlay filesystem enabled |
-| Audio ADC | HifiBerry DAC+ ADC Pro **or** Raspberry Pi Codec Zero. Unconfirmed, see `docs/CLIENT-DEPENDENCIES.md` |
+| Audio ADC | Raspberry Pi Codec Zero (D-009, decided 2026-10-01) |
 | Hydrophones | 2 × Aquarian H5 |
 | Capture | 48 kHz, 2 channels, 16-bit, 5-second clips |
 | Power | 40–100 W solar, 12 V LiFePO4, Victron BlueSolar MPPT over VE.Direct |
