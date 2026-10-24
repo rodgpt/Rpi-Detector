@@ -86,8 +86,12 @@ def active_names(cfg: dict) -> list:
 
 
 def loaded_names(cfg: dict) -> list:
-    """Los que además cargaron — esto es lo que publica status.json (R-2.6)."""
-    return [n for n in active_names(cfg) if _load(n) is not None]
+    """Los que además cargaron — esto es lo que publica status.json (R-2.6).
+    Se lo informa a health: con el registro consultado y cero cargados,
+    detector_ok pasa a false (contrato), en vez del true que decía antes."""
+    names = [n for n in active_names(cfg) if _load(n) is not None]
+    health.set_loaded_detectors(names)
+    return names
 
 
 def run(fs: int, samples, cfg: dict, rms: float) -> list:
@@ -103,17 +107,22 @@ def run(fs: int, samples, cfg: dict, rms: float) -> list:
     if unknown:
         health.set_registry_error(f"OCEANKIND_DETECTORS contiene desconocidos: {unknown}")
     detections = []
+    loaded = []
     auto_fallback = (not DETECTORS_ENV and cfg["detection_mode"] == "auto")
     for name in names:
         mod = _load(name)
         if mod is None:
             continue
+        loaded.append(name)
         try:
             d = mod.detect(fs, samples, cfg, rms)
-            if name == "psd_tonal":
-                health.record_classify_result(True)
+            # Contabilidad POR detector: antes solo psd_tonal registraba éxito y
+            # cualquier detector registraba fallo en el mismo contador, así que
+            # el éxito de psd_tonal borraba en cada clip los fallos de ml_mfcc
+            # y un segundo detector podía morir en todos los clips sin escalar.
+            health.record_classify_result(True, detector=name)
         except Exception as exc:
-            health.record_classify_result(False, f"{name}: {exc}")
+            health.record_classify_result(False, f"{name}: {exc}", detector=name)
             if auto_fallback:
                 d = _run_fallback_rms(fs, samples, cfg, rms)
             else:
@@ -121,6 +130,7 @@ def run(fs: int, samples, cfg: dict, rms: float) -> list:
         if d is not None:
             detections.append({**d, "detector": d.get("detector", name),
                                "decided_by": d.get("decided_by", name)})
+    health.set_loaded_detectors(loaded)
     return detections
 
 

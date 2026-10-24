@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import shutil
+import time
 import wave
 from datetime import datetime, timezone
 from pathlib import Path
@@ -191,18 +192,35 @@ def spool_event(event: dict, rel_path: str) -> None:
         log.error("evento PERDIDO: no se pudo subir ni encolar (%s)", exc)
 
 
-def drain_event_spool() -> None:
+def drain_event_spool(budget_s: float | None = None, keepalive=None) -> None:
+    """Reintenta el spool en orden. `budget_s` acota la pasada (corre en el hilo
+    que pingea al watchdog: 500 eventos × 60 s de timeout sin tope mataban una
+    unidad sana en plena recuperación); `keepalive` se llama entre eventos
+    (watchdog.tick). Lo que no alcanza queda para el próximo heartbeat."""
+    from . import health  # noqa: PLC0415
     if not C.EVENT_SPOOL_DIR.is_dir():
         return
+    deadline = time.monotonic() + budget_s if budget_s else None
     for f in sorted(C.EVENT_SPOOL_DIR.glob("*.json")):
+        if deadline is not None and time.monotonic() > deadline:
+            log.info("  drenado de eventos: presupuesto de %.0f s agotado, %d pendientes "
+                     "para el próximo tick", budget_s, event_spool_len())
+            break
+        if keepalive:
+            keepalive()
         try:
             item = json.loads(f.read_text())
-        except Exception:
+            rel_path, event = item["rel_path"], item["event"]
+        except Exception as exc:
+            # Ilegible = perdido. Se cuenta: antes se borraba sin contar, y un
+            # evento que desaparece sin dejar número es una falla silenciosa.
+            health.count_events_dropped(1)
+            log.error("spool: archivo ilegible %s DESCARTADO (%s)", f.name, exc)
             f.unlink(missing_ok=True)
             continue
-        if upload_json(item["rel_path"], item["event"]):
+        if upload_json(rel_path, event):
             f.unlink(missing_ok=True)
-            log.info("  → evento pendiente subido: %s", item["rel_path"])
+            log.info("  → evento pendiente subido: %s", rel_path)
         else:
             break   # la red sigue caída; no insistir esta vuelta
 

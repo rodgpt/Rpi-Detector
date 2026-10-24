@@ -181,9 +181,14 @@ OCEANKIND_SENSOR_LOCATION=
 OCEANKIND_SENSOR_LAT=
 OCEANKIND_SENSOR_LON=
 
-# ── Secrets (REQUIRED — service will not start without them) ──
-# Comment the line below out once real TWILIO_SID/TOKEN are filled in.
+# ── Secrets ──
+# No Twilio yet? Leave the next two lines exactly as they are: the unit runs as a
+# declared bench (the dashboard shows "banco, sin Twilio") and cannot page
+# anyone. When you have credentials: fill in SID/TOKEN below and delete BOTH
+# lines together (D-019). One without the other refuses to start on purpose —
+# a unit that reports to the dashboard but cannot reach a human must say so.
 OCEANKIND_ALLOW_NO_TWILIO=1
+OCEANKIND_BENCH=1
 OCEANKIND_TWILIO_SID=
 OCEANKIND_TWILIO_TOKEN=
 
@@ -230,6 +235,20 @@ OCEANKIND_IOTHUB_CONNECTION_STRING=
 ENV_EOF
     chmod 600 /etc/oceankind.env
     echo "Environment template written to /etc/oceankind.env — FILL IT IN before starting."
+fi
+
+# ── 7a. Env migrations (idempotent; re-running setup.sh is the update path) ──
+# D-019 (2026-10-24): ALLOW_NO_TWILIO=1 together with a backend URL now refuses
+# to start unless the unit declares itself a bench. Every unit provisioned from
+# QUICKGUIDE before that date has the first two and not the third. Add it here
+# so an update never strands a unit over a line nobody knew to add. A unit that
+# later gets real Twilio credentials deletes both lines by hand (see template).
+if [ -f /etc/oceankind.env ] \
+   && grep -qE '^[[:space:]]*OCEANKIND_ALLOW_NO_TWILIO=1' /etc/oceankind.env \
+   && ! grep -qE '^[[:space:]]*OCEANKIND_BENCH=' /etc/oceankind.env; then
+    printf '\n# Added by setup.sh %s (D-019): this unit runs without Twilio and declares it.\n# Delete this line together with ALLOW_NO_TWILIO once real credentials are filled in.\nOCEANKIND_BENCH=1\n' \
+        "$(date +%F)" >> /etc/oceankind.env
+    echo "D-019: OCEANKIND_BENCH=1 appended to /etc/oceankind.env (unit declared as bench, no Twilio)."
 fi
 
 # ── 7b. OTA boot unit ─────────────────────────────────────────────────────────

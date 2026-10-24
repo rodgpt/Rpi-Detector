@@ -104,6 +104,7 @@ class Pipeline:
         rms, peak_db = capture.rms_and_peak(clip)
         self.last_rms, self.last_peak_db = rms, peak_db
         health.record_rms(rms)
+        health.record_clip()    # F-29: prueba positiva de que la captura sigue viva
 
         # La cadena ordenada de detectores (D-014): cada uno mira el mismo
         # audio buscando su propia firma; lo que sale viene tipado.

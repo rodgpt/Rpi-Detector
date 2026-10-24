@@ -21,6 +21,7 @@ Deshabilitado (sin OCEANKIND_BACKEND_URL) el dispositivo es blob-only y el
 import json
 import logging
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -41,8 +42,10 @@ log = logging.getLogger("oceankind")
 _USER_AGENT = f"oceankind-device/{__version__}"
 
 _lock = threading.Lock()
-_auth_failed = False          # 401: credencial rechazada/revocada → dejar de intentar
+_auth_failed = False          # 401: credencial rechazada/revocada → dejar de intentar…
+_auth_failed_at = 0.0         # …hasta AUTH_RETRY_S después, cuando se prueba UNA vez más
 _backend_down_logged = False  # dedup del log de "backend inalcanzable" (eventos)
+_config_down_logged = False   # dedup del log de GET /api/devices/config fallando
 
 # ── Heartbeat (salud/telemetría, D-0xx) ───────────────────────────────────────
 # Camino aparte de push_event(): sin spool y sin cola propia. Comparte
@@ -57,8 +60,25 @@ def enabled() -> bool:
 
 
 def auth_failed() -> bool:
+    """True mientras la credencial está rechazada. Cada AUTH_RETRY_S se levanta
+    el cerrojo para UN reintento: si el backend vuelve a decir 401, se vuelve a
+    cerrar; si ya acepta (401 transitorio por un despliegue con la BD caída), la
+    unidad vuelve sola. Antes el cerrojo duraba hasta un reinicio que nadie
+    puede provocar remotamente — la unidad quedaba muda y nada lo decía."""
+    global _auth_failed
     with _lock:
+        if _auth_failed and time.monotonic() - _auth_failed_at >= C.AUTH_RETRY_S:
+            _auth_failed = False
+            log.info("push: %.0f s desde el 401 — reintentando la credencial del backend una vez",
+                     C.AUTH_RETRY_S)
         return _auth_failed
+
+
+def _latch_auth_failed() -> None:
+    global _auth_failed, _auth_failed_at
+    with _lock:
+        _auth_failed = True
+        _auth_failed_at = time.monotonic()
 
 
 def _serialize(event: dict) -> bytes:
@@ -110,11 +130,10 @@ def _post(event: dict) -> str:
     if code == 401:
         # Un dispositivo revocado que deja de reportar en silencio es
         # indistinguible de uno muerto: evento de salud, no línea de log.
-        with _lock:
-            _auth_failed = True
-        log.error("push %s: 401 — credencial del backend rechazada (%s). Push DETENIDO hasta "
-                  "reinicio con OCEANKIND_DEVICE_KEY corregida. El blob sigue escribiéndose.",
-                  eid, body_snippet or "sin cuerpo")
+        _latch_auth_failed()
+        log.error("push %s: 401 — credencial del backend rechazada (%s). Push DETENIDO; se "
+                  "reintenta una vez cada %.0f s (OCEANKIND_DEVICE_KEY). El blob sigue "
+                  "escribiéndose.", eid, body_snippet or "sin cuerpo", C.AUTH_RETRY_S)
         return "auth"
     if code in (400, 403):
         # El cuerpo real de la respuesta, no una adivinanza fija. Un 403 con
@@ -181,15 +200,27 @@ def _spool(event: dict) -> None:
         log.warning("no se pudo encolar el push (%s) — el blob conserva el evento", exc)
 
 
-def drain_push_spool() -> None:
-    """Reintenta el spool completo, un request por evento, en cada heartbeat.
-    Se corta ante backend caído o 401; los rechazos terminales salen del spool."""
+def drain_push_spool(budget_s: float | None = None, keepalive=None) -> None:
+    """Reintenta el spool, un request por evento, en cada heartbeat. Se corta
+    ante backend caído, 401 o presupuesto agotado (`budget_s`: este hilo pingea
+    al watchdog y 500 POSTs × 10 s sin tope lo dejaban sin pingear); los
+    rechazos terminales salen del spool. `keepalive` se llama entre eventos."""
     if not enabled() or auth_failed() or not C.PUSH_SPOOL_DIR.is_dir():
         return
+    deadline = time.monotonic() + budget_s if budget_s else None
     for f in sorted(C.PUSH_SPOOL_DIR.glob("*.json")):
+        if deadline is not None and time.monotonic() > deadline:
+            log.info("  drenado de push: presupuesto de %.0f s agotado, %d pendientes "
+                     "para el próximo tick", budget_s, spool_len())
+            break
+        if keepalive:
+            keepalive()
         try:
             event = json.loads(f.read_text())
-        except Exception:
+        except Exception as exc:
+            health.count_push_dropped(1)
+            log.warning("spool de push: archivo ilegible %s descartado (%s) — el blob lo conserva",
+                        f.name, exc)
             f.unlink(missing_ok=True)
             continue
         outcome = _post(event)
@@ -266,12 +297,12 @@ def post_heartbeat(status: dict) -> None:
     if code == 401:
         # Misma credencial que los eventos: un 401 aquí también los detiene,
         # y viceversa (auth_failed() es compartido).
+        _latch_auth_failed()
         with _lock:
-            _auth_failed = True
             _hb_fail_streak += 1
         log.error("heartbeat: 401 — credencial del backend rechazada (%s). Heartbeat y push "
-                  "de eventos DETENIDOS hasta reinicio con OCEANKIND_DEVICE_KEY corregida.",
-                  body_snippet or "sin cuerpo")
+                  "de eventos DETENIDOS; se reintenta una vez cada %.0f s (OCEANKIND_DEVICE_KEY).",
+                  body_snippet or "sin cuerpo", C.AUTH_RETRY_S)
         return
     # Cualquier otro código (400/403/5xx/inesperado): se descarta igual, sin
     # distinguir motivo — no hay spool ni nada que conservar.
@@ -288,3 +319,64 @@ def spool_len() -> int:
         return sum(1 for _ in C.PUSH_SPOOL_DIR.glob("*.json")) if C.PUSH_SPOOL_DIR.is_dir() else 0
     except Exception:
         return 0
+
+
+def fetch_config() -> dict | None:
+    """GET /api/devices/config — el documento de configuración firmado, byte a
+    byte el mismo que el blob `sites/{site}/remote_config.json` (D-020).
+
+    Camino de ENTREGA para las unidades push-only (sin Azure ni OUTPUT_DIR):
+    antes la config remota solo se consultaba con almacenamiento activo, así
+    que una unidad aprovisionada según QUICKGUIDE no era afinable sin firmware,
+    contra la regla de D-014/D-015. La verificación (firma, clamps, rechazo
+    entero) es la misma de siempre: este módulo solo transporta bytes.
+
+    None = sin backend, credencial rechazada, nada publicado (404), red caída
+    o cuerpo que no es un objeto JSON. Ninguno de esos casos aplica defaults:
+    la última config válida sigue vigente ("stale and detecting beats fresh
+    and silent").
+    """
+    global _config_down_logged
+    if not enabled() or auth_failed():
+        return None
+    req = urllib.request.Request(
+        f"{C.BACKEND_URL.rstrip('/')}/api/devices/config",
+        method="GET",
+        headers={
+            "User-Agent":   _USER_AGENT,
+            "X-Device-Id":  C.DEVICE_ID,
+            "X-Device-Key": C.DEVICE_KEY,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=C.BACKEND_TIMEOUT_S) as resp:
+            body = resp.read(1 << 20)   # una config son cientos de bytes; 1 MiB es un tope, no un tamaño
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            _latch_auth_failed()
+            log.error("config: 401 — credencial del backend rechazada; push y heartbeat detenidos "
+                      "(se reintenta cada %.0f s)", C.AUTH_RETRY_S)
+            return None
+        if exc.code == 404:
+            return None   # nada publicado para este sitio: no es error
+        if not _config_down_logged:
+            try:
+                snippet = exc.read(300).decode("utf-8", errors="replace").strip()
+            except Exception:
+                snippet = ""
+            log.warning("config: GET /api/devices/config → %d (%s) — se mantiene la última "
+                        "config válida", exc.code, snippet or "sin cuerpo")
+            _config_down_logged = True
+        return None
+    except Exception as exc:
+        if not _config_down_logged:
+            log.warning("config: backend inalcanzable (%s) — se mantiene la última config válida", exc)
+            _config_down_logged = True
+        return None
+    _config_down_logged = False
+    try:
+        doc = json.loads(body)
+    except Exception as exc:
+        log.warning("config: respuesta no es JSON (%s) — ignorada", exc)
+        return None
+    return doc if isinstance(doc, dict) else None

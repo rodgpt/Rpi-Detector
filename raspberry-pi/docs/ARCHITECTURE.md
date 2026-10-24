@@ -1,7 +1,7 @@
 # Device architecture
 
 **Describes the `oceankind/` package as built (Phase 2).**
-**Last updated:** 2026-08-13
+**Last updated:** 2026-10-24 (fail-loud hardening after the repo health review: F-29 capture stall, per-detector accounting, upload-backlog alerting, housekeeping time budgets, config delivery for push-only units, IoT Hub off by default)
 
 Device-internal design. System-level architecture is in `../../docs/ARCHITECTURE.md`. Read this before making any design decision on the Pi.
 
@@ -50,6 +50,8 @@ Shutdown (SIGTERM/SIGINT) is ordered: source stops, workers join, undelivered tr
 
 A hang is no longer invisible (R-2.7, 2026-08-26): under systemd, `watchdog.py` pings `WATCHDOG=1` only while the classify and transport threads prove alive (a heartbeat per loop iteration, empty ones included); a hung thread starves the ping and `WatchdogSec=120` restarts the service. Outside systemd (bench runs by hand) the watchdog is a no-op. The superseded monoliths are preserved in `legacy/superseded-monolith/`.
 
+The housekeeping thread is the one that pings, so nothing on it may run unbounded (2026-10-24, F-33). Every drain and retry it performs — event spool, push spool, pending WhatsApp alerts — takes a time budget (`OCEANKIND_HOUSEKEEPING_BUDGET_S`, 30 s) and calls `watchdog.tick()` between items; what does not fit waits for the next heartbeat. Before this, a 500-event drain after an outage (500 × 60 s read timeout) or 50 pending WhatsApp alerts (× 15 s × recipients) could exceed `WatchdogSec` and systemd would restart a *healthy* unit in mid-recovery; worse, the WhatsApp retry only persisted its attempt counter after the loop, so the kill replayed the same alerts forever. Capture starts before any network call (IoT Hub connect, WhatsApp retries) for the same reason. Degradation alerts raised on the classify thread are queued in `health` and sent by housekeeping (`flush_degraded_alerts`), never inline.
+
 ---
 
 ## Threading model
@@ -60,7 +62,7 @@ A hang is no longer invisible (R-2.7, 2026-08-26): under systemd, `watchdog.py` 
 |---|---|---|---|
 | capture (`capture.py`) | PortAudio stream, block queue | Audio hardware | Network, disk, heavy CPU |
 | classify (`pipeline.py`) | Window assembly (5 s, optionally overlapped via `window_hop_s`), the ordered detector registry (`detectors/`, D-014), alert decision, archive sampling | CPU, small local writes | Network |
-| transport (`pipeline.py`) | Blob uploads, direct event push to the backend (`push.py`), WhatsApp, IoT, cluster call | Network | Blocks anything upstream |
+| transport (`pipeline.py`) | Blob uploads, direct event push to the backend (`push.py`), WhatsApp, IoT (off unless `OCEANKIND_IOTHUB_ENABLED=1`), cluster call | Network | Blocks anything upstream |
 | housekeeping (main thread) | status.json, VE.Direct serial, modem HTTP, `/proc`, config poll, retries | Serial, network, sysfs | Touches the audio device |
 
 One deliberate deviation from the original five-thread design: telemetry and the config poller are folded into the housekeeping main thread. They are all timer-driven, none touches the audio path, and fewer threads is cheaper on the 512 MB bench unit. The isolation guarantee that matters — nothing between two audio blocks — is unchanged.
@@ -90,7 +92,9 @@ Shared state and its protection:
          [SHUTDOWN]   (still running, still capturing, saying so)
 ```
 
-`DEGRADED` means any of: `health.detector_ok: false` (3 consecutive classifier failures), `health.audio_ok: false` (peak RMS below the floor across the window), or running without Twilio credentials (bench mode). Each sets `health.degraded_reason` to something a human can act on, and the detector/audio cases each send one WhatsApp degradation alert, deduped until recovery. The device keeps doing everything it still can — in `auto` mode a dead classifier falls back to real RMS detection.
+`DEGRADED` means any of: `health.detector_ok: false` (no detector loaded, or 3 consecutive failures of any one loaded detector — counted per detector since 2026-10-24, F-31), `health.audio_ok: false` (peak RMS below the floor across the window), `health.capture_ok: false` (no audio window assembled for `CAPTURE_STALL_S`, or duty cycle under 90 % — F-29), the event spool failing to drain for 3 heartbeats (F-32), a rejected or malformed remote config, a 401 from the backend, or 3 failed heartbeats in a row. Each sets `health.degraded_reason` to something a human can act on and sends one WhatsApp degradation alert, deduped until recovery. Running without Twilio credentials is **not** a degradation: it is published as `health.alerts_enabled: false` and must be declared with `OCEANKIND_BENCH=1` when the unit also reaches a backend (D-019). The device keeps doing everything it still can — in `auto` mode a dead classifier falls back to real RMS detection.
+
+The health windows (duty cycle, RMS peak) are trimmed when they are *read*, not only when new samples arrive. Trimmed only on write, a stream that dies leaves both frozen at their last healthy value — 100 % duty, `audio_ok: true` — which is the silent-deaf shape exactly (F-29, found by the 2026-10-24 review; the same shape F-28 showed on the bench).
 
 Additionally, invalid configuration (missing secrets, unknown detection mode) is a refuse-to-start, not a degraded state: systemd restart-loops loudly rather than the unit running misprovisioned.
 
@@ -154,8 +158,8 @@ Status after Phase 1 (2026-08-12):
 | Failure | Now | Remaining |
 |---|---|---|
 | Classifier fails (F-02) | **Fixed:** counted, alarmed, `detector_ok: false`; RMS fallback in `auto` mode; retried every clip | — |
-| Capture device vanishes | Warn and retry the same dead index (F-15); `audio_ok: false` + alarm after the health window | Re-detect by name (Phase 2) |
-| Process hangs without crashing | **Fixed 2026-08-26 (R-2.7):** systemd `WatchdogSec=120` + pings gated on thread heartbeats — a hung main/classify/transport thread starves the ping and systemd restarts the service. Deliberate boundary: degraded-but-running states (dead hydrophone, network down) do NOT restart — they fail loud instead; a restart loop would mask them. A stalled capture *callback* reaches the fail-loud path (duty/audio_ok), not the watchdog | — |
+| Capture device vanishes or the stream silently stops | Warn and retry the same dead index (F-15); `audio_ok: false` + alarm after the health window | Re-detect by name (Phase 2); since 2026-10-24 `capture_ok: false` + alarm within `CAPTURE_STALL_S` (60 s), duty cycle reads 0, not 100 (F-29) |
+| Process hangs without crashing | **Fixed 2026-08-26 (R-2.7):** systemd `WatchdogSec=120` + pings gated on thread heartbeats — a hung main/classify/transport thread starves the ping and systemd restarts the service. Deliberate boundary: degraded-but-running states (dead hydrophone, network down) do NOT restart — they fail loud instead; a restart loop would mask them. A stalled capture *callback* reaches the fail-loud path (`capture_ok`, duty, `last_clip_age_s`), not the watchdog — true only since 2026-10-24; before, the windows froze at their last healthy value (F-29) | — |
 | Upload fails after notify (F-13) | **Fixed:** upload first, `clip_uploaded` recorded truthfully, no dead links | — |
 | Bad update | **Fixed, 2026-09-04 then hardened 2026-09-30 (F-06, F-27):** journaled install, local snapshot, post-restart health gate, boot-time recovery. `tools/ota_fault_test.sh` cuts the real script at every command boundary (power/network, single and double faults) — 0 violations after the rewrite | Proof on real hardware: passwordless sudo from the boot unit, the real overlay and power-cut campaign (`docs/OTA-FAULT-TESTING.md` §5) |
 | Archive queue backs up | **Fixed:** bounded at 300, drops counted in `health.clips_dropped` | Capture/transport queues arrive with Phase 2 |

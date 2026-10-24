@@ -73,9 +73,29 @@ for _ in range(C.DETECTOR_FAIL_LIMIT):
 check("detector_ok false after consecutive failures", not health.detector_ok())
 h = health.build_health()
 check("degraded_reason names the detector", h["detector_ok"] is False and "clasificador" in (h["degraded_reason"] or ""))
-check("bench mode declared in degraded_reason", "Twilio" in (h["degraded_reason"] or ""))
+check("bench mode is a boolean, NOT a degradation", h["alerts_enabled"] is False
+      and "Twilio" not in (h["degraded_reason"] or ""))
 health.record_classify_result(True)
 check("recovery resets", health.detector_ok() and health.build_health()["detector_ok"] is True)
+
+print("2b. per-detector accounting (D-014): one detector failing cannot hide behind another")
+health.set_loaded_detectors(["psd_tonal", "ml_mfcc"])
+for _ in range(C.DETECTOR_FAIL_LIMIT):
+    health.record_classify_result(True, detector="psd_tonal")          # el primero va bien…
+    health.record_classify_result(False, "boom", detector="ml_mfcc")   # …el segundo muere en cada clip
+h = health.build_health()
+check("second detector failing flips detector_ok", h["detector_ok"] is False)
+check("reason names the failing detector only", "ml_mfcc" in (h["degraded_reason"] or "")
+      and "psd_tonal (" not in (h["degraded_reason"] or ""), f"({h['degraded_reason']})")
+health.record_classify_result(True, detector="ml_mfcc")
+check("per-detector recovery", health.detector_ok())
+health.set_loaded_detectors([])
+h = health.build_health()
+check("zero detectors loaded -> detector_ok false (contract)", h["detector_ok"] is False
+      and "ningún detector" in (h["degraded_reason"] or ""))
+health.set_loaded_detectors(["psd_tonal"])
+check("alerts from the classify thread are QUEUED, not sent inline",
+      health.flush_degraded_alerts() >= 1)   # the ml_mfcc escalation above queued one
 
 print("3. duty cycle (frame-based)")
 health.mark_capture_started()
@@ -89,11 +109,44 @@ check("duty_cycle_pct ~100 when frames keep up", d is not None and 80.0 <= d <= 
 check("deaf_seconds small when healthy", health.deaf_seconds_total() < 1.0,
       f"({health.deaf_seconds_total()})")
 
+print("3b. dead capture stream is LOUD, not 100 % (F-29)")
+health.record_clip()
+_saved = (C.DUTY_WINDOW_S, C.CAPTURE_STALL_S)
+C.DUTY_WINDOW_S, C.CAPTURE_STALL_S = 1.1, 0.8   # window > 1 s: duty returns None at span <= 1 s
+_time.sleep(1.3)                        # frames stop arriving; nothing calls record_frames
+d = health.duty_cycle_pct()
+check("duty_cycle drops to 0 when frames stop (window trimmed on READ)", d == 0.0, f"({d})")
+check("capture_stalled after CAPTURE_STALL_S without a clip", health.capture_stalled())
+h = health.build_health()
+check("capture_ok false + degraded_reason says captura detenida",
+      h["capture_ok"] is False and "captura detenida" in (h["degraded_reason"] or ""),
+      f"({h['degraded_reason']})")
+health.maybe_alert_capture()
+check("one alert queued for the stall", health.flush_degraded_alerts() == 1)
+health.maybe_alert_capture()
+check("no duplicate alert while still stalled", health.flush_degraded_alerts() == 0)
+C.DUTY_WINDOW_S, C.CAPTURE_STALL_S = _saved
+health.record_frames(int(10 * C.SAMPLE_RATE))   # the stream is back: plenty of audio for the span
+health.record_clip()
+check("recovery: capture_ok true again", health.build_health()["capture_ok"] is True,
+      f"({health.build_health()['degraded_reason']})")
+
+print("3c. stale RMS history cannot keep audio_ok true forever")
+_saved_w = C.AUDIO_HEALTH_WINDOW_S
+for _ in range(5):
+    health.record_rms(0.05)
+C.AUDIO_HEALTH_WINDOW_S = 0.2
+_time.sleep(0.3)
+ok, peak, n = health.audio_health()
+check("rms window trimmed on READ (stale samples gone)", n == 0 and peak == 0.0, f"(n={n})")
+C.AUDIO_HEALTH_WINDOW_S = _saved_w
+
 print("4. health block completeness")
 h = health.build_health()
-for key in ("detector_ok", "audio_ok", "duty_cycle_pct", "deaf_seconds_total",
-            "clips_dropped", "capture_overflows", "suppressed_count", "upload_backlog",
-            "events_dropped", "wa_pending", "archive_queue", "degraded_reason"):
+for key in ("detector_ok", "audio_ok", "capture_ok", "duty_cycle_pct", "deaf_seconds_total",
+            "last_clip_age_s", "clips_dropped", "capture_overflows", "suppressed_count",
+            "upload_backlog", "events_dropped", "wa_pending", "archive_queue",
+            "alerts_enabled", "degraded_reason"):
     check(f"health.{key} present", key in h)
 
 print("5. non-finite floats (R-4.6)")
@@ -261,9 +314,53 @@ print("10. startup validation")
 check("bench escape hatch allows start", C.TWILIO_CONFIGURED is False and C.ALLOW_NO_TWILIO is True)
 try:
     C.validate_startup_config()
-    check("validate passes with ALLOW_NO_TWILIO", True)
+    check("validate passes with ALLOW_NO_TWILIO (no backend, no storage)", True)
 except SystemExit:
-    check("validate passes with ALLOW_NO_TWILIO", False)
+    check("validate passes with ALLOW_NO_TWILIO (no backend, no storage)", False)
+
+# D-019: a unit that reaches the backend but cannot reach a human must declare
+# itself a bench (OCEANKIND_BENCH=1) or refuse to start.
+C.BACKEND_URL, C.DEVICE_KEY, C.SITE = "https://backend.example", "k", "banco"
+try:
+    C.validate_startup_config()
+    check("ALLOW_NO_TWILIO + BACKEND_URL without OCEANKIND_BENCH refuses to start", False)
+except SystemExit:
+    check("ALLOW_NO_TWILIO + BACKEND_URL without OCEANKIND_BENCH refuses to start", True)
+C.BENCH = True
+try:
+    C.validate_startup_config()
+    check("…and starts once OCEANKIND_BENCH=1 is declared", True)
+except SystemExit:
+    check("…and starts once OCEANKIND_BENCH=1 is declared", False)
+C.BENCH, C.BACKEND_URL, C.DEVICE_KEY, C.SITE = False, "", "", ""
+
+print("11. upload backlog is a degradation after UPLOAD_BACKLOG_ALERT_TICKS heartbeats")
+_saved_spool = C.EVENT_SPOOL_DIR
+C.EVENT_SPOOL_DIR = Path(tempfile.mkdtemp(prefix="ok_spool_"))
+C.EVENT_SPOOL_DIR.mkdir(exist_ok=True)
+(C.EVENT_SPOOL_DIR / "stuck.json").write_text('{"rel_path":"x","event":{}}')
+for _ in range(C.UPLOAD_BACKLOG_ALERT_TICKS):
+    health.note_upload_backlog()
+h = health.build_health()
+check("degraded_reason names the failing uploads", "subidas" in (h["degraded_reason"] or ""),
+      f"({h['degraded_reason']})")
+check("exactly one alert queued", health.flush_degraded_alerts() == 1)
+(C.EVENT_SPOOL_DIR / "stuck.json").unlink()
+health.note_upload_backlog()
+check("drained spool clears the reason", "subidas" not in (health.build_health()["degraded_reason"] or ""))
+C.EVENT_SPOOL_DIR = _saved_spool
+
+print("12. spool drain: unreadable files are COUNTED, not silently deleted")
+from oceankind import storage as _storage  # noqa: E402
+C.EVENT_SPOOL_DIR = Path(tempfile.mkdtemp(prefix="ok_spool2_"))
+C.EVENT_SPOOL_DIR.mkdir(exist_ok=True)
+(C.EVENT_SPOOL_DIR / "a.json").write_text("not json")
+(C.EVENT_SPOOL_DIR / "b.json").write_text('{"event": {}}')          # falta rel_path
+_before = health.build_health()["events_dropped"]
+_storage.drain_event_spool()
+check("2 unreadable spool files counted as dropped",
+      health.build_health()["events_dropped"] == _before + 2 and not list(C.EVENT_SPOOL_DIR.glob("*.json")))
+C.EVENT_SPOOL_DIR = _saved_spool
 
 print()
 if FAILURES:

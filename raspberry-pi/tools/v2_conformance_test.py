@@ -95,10 +95,17 @@ assert (OUT / event_rel4).exists(), "drained event missing from tree"
 # ── status.json through the real builder (modem/solar absent → nulls) ────────
 health.mark_capture_started()
 health.record_frames(int(5 * fs))
-main.upload_status(now - timedelta(hours=2), 2, 0.0142)
+health.record_clip()
+# collect_status + write_status_blob replaced upload_status on 2026-09-23 (the
+# heartbeat POST needs the same data without storage). This test called the old
+# name for a month and nobody noticed because nothing runs it automatically.
+status, _sensors = main.collect_status(now - timedelta(hours=2), 2, 0.0142)
+main.write_status_blob(status, 2, 0.0142)
+assert status["health"]["degraded_reason"] is None, status["health"]["degraded_reason"]
+assert status["health"]["capture_ok"] is True and status["health"]["alerts_enabled"] is False
 
 # ── power_history.json from a synthetic telemetry CSV ────────────────────────
-CSVLOG.unlink(missing_ok=True)   # upload_status appended a live row; test wants a known set
+CSVLOG.unlink(missing_ok=True)   # write_status_blob appended a live row; test wants a known set
 with CSVLOG.open("w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=telemetry.DATA_LOG_COLUMNS)
     w.writeheader()

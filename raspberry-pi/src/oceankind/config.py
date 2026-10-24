@@ -68,6 +68,12 @@ SITE_ID_RE = re.compile(r"^[a-z0-9_-]+$")
 
 # ── Identidad y almacenamiento ───────────────────────────────────────────────
 IOTHUB_CONNECTION_STRING  = os.environ.get("OCEANKIND_IOTHUB_CONNECTION_STRING", "")
+# Rama muerta conocida (nada la consume; TODO.md). Apagada por defecto: solo se
+# conecta con la bandera explícita Y la connection string. connect() sin
+# timeout bloqueaba el arranque de la captura si el hub no respondía.
+IOTHUB_ENABLED            = (os.environ.get("OCEANKIND_IOTHUB_ENABLED", "0") == "1"
+                             and bool(IOTHUB_CONNECTION_STRING))
+IOTHUB_CONNECT_TIMEOUT_S  = float(os.environ.get("OCEANKIND_IOTHUB_CONNECT_TIMEOUT_S", "10"))
 STORAGE_CONNECTION_STRING = os.environ.get("OCEANKIND_STORAGE_CONNECTION_STRING", "")
 STORAGE_CONTAINER         = os.environ.get("OCEANKIND_STORAGE_CONTAINER", "alerts")
 # Modo banco/validación (R-9.4): blobs como archivos locales; validar con
@@ -93,6 +99,11 @@ TWILIO_ACCOUNT_SID = os.environ.get("OCEANKIND_TWILIO_SID", "")
 TWILIO_AUTH_TOKEN  = os.environ.get("OCEANKIND_TWILIO_TOKEN", "")
 ALLOW_NO_TWILIO    = os.environ.get("OCEANKIND_ALLOW_NO_TWILIO", "0") == "1"
 TWILIO_CONFIGURED  = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN)
+# Declaración explícita de banco de pruebas. ALLOW_NO_TWILIO=1 por sí solo ya no
+# basta en una unidad que SÍ alcanza el backend o el almacenamiento: esa unidad
+# produce datos reales y no tiene cómo avisar a un humano. Sin esta variable, esa
+# combinación se niega a arrancar (validate_startup_config, D-019).
+BENCH              = os.environ.get("OCEANKIND_BENCH", "0") == "1"
 TWILIO_FROM        = os.environ.get("OCEANKIND_TWILIO_FROM", "whatsapp:+56926280872")
 _TWILIO_TO_RAW     = os.environ.get("OCEANKIND_TWILIO_TO", "whatsapp:+56961987942")
 TWILIO_TO_LIST     = [n.strip() for n in _TWILIO_TO_RAW.split(",") if n.strip()]
@@ -219,6 +230,25 @@ POWER_HISTORY_HOURS         = 72
 POWER_HISTORY_BUCKET_S      = 30 * 60
 DUTY_WINDOW_S               = float(os.environ.get("OCEANKIND_DUTY_WINDOW_S", "3600"))
 
+# ── Fail-loud de captura (F-29) ──────────────────────────────────────────────
+# Un stream que deja de entregar bloques no lanza excepción: PortAudio
+# simplemente deja de llamar al callback. Lo único que lo delata es que no se
+# arma ninguna ventana de audio. Pasado CAPTURE_STALL_S sin ventana → degradado
+# y aviso. Con hop 5 s, 60 s son ~12 ventanas perdidas: margen amplio contra un
+# clasificador lento, estrecho contra una tarde entera de sordera.
+CAPTURE_STALL_S             = float(os.environ.get("OCEANKIND_CAPTURE_STALL_S", "60"))
+# Duty cycle medido por debajo de esto también es degradación (mismo umbral que
+# usa el dashboard para pintar "degradado", así ambos lados cuentan lo mismo).
+CAPTURE_DUTY_MIN_PCT        = float(os.environ.get("OCEANKIND_CAPTURE_DUTY_MIN_PCT", "90"))
+# Subidas al almacenamiento fallando: tantos heartbeats seguidos con cola > 0
+# → degradado y aviso (antes era solo un contador que nadie miraba).
+UPLOAD_BACKLOG_ALERT_TICKS  = int(os.environ.get("OCEANKIND_UPLOAD_BACKLOG_ALERT_TICKS", "3"))
+# Presupuesto de tiempo por pasada de cada drenado/reintento del hilo
+# housekeeping. Ese hilo es el que pingea al watchdog de systemd (WatchdogSec
+# 120 s): un drenado de 500 eventos sin tope lo dejaba sin pingear y systemd
+# reiniciaba una unidad SANA en plena recuperación.
+HOUSEKEEPING_BUDGET_S       = float(os.environ.get("OCEANKIND_HOUSEKEEPING_BUDGET_S", "30"))
+
 # Estado de runtime. HOY es tmpfs (RAM) bajo la protección SD — misma ruta que
 # crea la regla tmpfiles de protect_sd.sh. Cuando D-002 decida una partición
 # persistente, cambiar SOLO esta variable.
@@ -252,6 +282,10 @@ DEVICE_KEY        = os.environ.get("OCEANKIND_DEVICE_KEY", "")
 BACKEND_TIMEOUT_S = float(os.environ.get("OCEANKIND_BACKEND_TIMEOUT_S", "10"))
 PUSH_SPOOL_DIR    = Path(os.environ.get("OCEANKIND_PUSH_SPOOL_DIR", str(STATE_DIR / "push_spool")))
 PUSH_SPOOL_MAX    = int(os.environ.get("OCEANKIND_PUSH_SPOOL_MAX", "500"))
+# Tras un 401 el push se detiene, pero NO para siempre: cada AUTH_RETRY_S se
+# vuelve a probar una vez. Un 401 transitorio (backend desplegando con la BD
+# caída) dejaba la unidad muda hasta un reinicio que nadie puede provocar.
+AUTH_RETRY_S      = float(os.environ.get("OCEANKIND_AUTH_RETRY_S", "3600"))
 
 # Colas acotadas (R-1.3). Dimensionadas para 512 MB: un clip estéreo int16 de
 # 5 s son ~960 KB.
@@ -449,6 +483,17 @@ def validate_startup_config() -> None:
     if BACKEND_URL and not DEVICE_KEY:
         problems.append("OCEANKIND_BACKEND_URL definida pero falta OCEANKIND_DEVICE_KEY — "
                         "la clave por dispositivo la emite el backend al registrar la unidad.")
+    # Una unidad que alcanza el backend o el almacenamiento produce datos que
+    # alguien va a mirar; si además no puede avisar a nadie por WhatsApp, eso
+    # es un banco de pruebas y tiene que decirlo (OCEANKIND_BENCH=1), o es una
+    # unidad de producción mal aprovisionada y no debe arrancar (D-019).
+    if (ALLOW_NO_TWILIO and not TWILIO_CONFIGURED and not BENCH
+            and (BACKEND_URL or STORAGE_CONNECTION_STRING)):
+        problems.append(
+            "OCEANKIND_ALLOW_NO_TWILIO=1 con OCEANKIND_BACKEND_URL/STORAGE configurados: "
+            "la unidad reporta al dashboard pero no puede avisar a ningún humano. "
+            "Si esto es un banco de pruebas, declararlo con OCEANKIND_BENCH=1; si es "
+            "producción, definir OCEANKIND_TWILIO_SID/TOKEN y quitar ALLOW_NO_TWILIO.")
     if BACKEND_URL and not BACKEND_URL.startswith(("http://", "https://")):
         problems.append(f"OCEANKIND_BACKEND_URL={BACKEND_URL!r} debe empezar con http:// o https://")
     # SITE lo exige CUALQUIERA de los dos destinos, no solo el almacenamiento.

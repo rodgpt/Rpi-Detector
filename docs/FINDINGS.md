@@ -8,7 +8,7 @@
 
 Consolidated from three prior audits plus a line-by-line verification pass, deduplicated, verified against source, and ranked. Every entry was checked against the code as it exists today. Entries that came from the prior reports but did not survive verification are recorded as such rather than dropped.
 
-Paths are post-restructure. Last verified: 2 August 2026.
+Paths are post-restructure. Last verified: 2 August 2026 (F-01…F-24); later entries carry their own dates. Last edited 2026-10-24 (F-29…F-36, repo health review).
 
 **Severity scale.** CRITICAL means the system can stop detecting, or can destroy its own record of detections, while continuing to report itself healthy. HIGH means a real exposure or a failure mode with no recovery path. MEDIUM means it degrades or misleads. LOW means it is worth knowing. INFO is context, not a defect.
 
@@ -42,6 +42,18 @@ Paths are post-restructure. Last verified: 2 August 2026.
 | F-22 | HIGH | Archive queue cap exceeds the RAM it lives in — **FIXED 2026-08-12** | New | 1 |
 | F-23 | MEDIUM | PSD algorithm duplicated — **FIXED 2026-08-26**: canonical in `detectors/psd_tonal.py`, duplicate retired to legacy | New | 1 |
 | F-24 | MEDIUM | model.joblib is dead weight — **FULLY CLOSED 2026-08-26**: restored as the `ml_mfcc` registry detector | New | 1 |
+| F-25 | LOW | WhatsApp heartbeat logged "enviado" for a send that never happened — **FIXED 2026-09-23** | Bench | — |
+| F-26 | HIGH | No liveness signal at all for a unit with no storage configured — **FIXED 2026-09-23 (D-018)** | Bench | — |
+| F-27 | CRITICAL | OTA could be cut short into a permanently bad or unprotected unit — **fixed in code 2026-09-30, unproven on hardware** | Fault injection | — |
+| F-28 | HIGH | Codec Zero ships with AUX IN capture fully muted — **FIXED 2026-10-24** (bookworm); trixie re-proof pending | Bench | — |
+| F-29 | CRITICAL | Dead capture stream reported 100 % duty, `audio_ok: true`, `detector_ok: true` — **FIXED 2026-10-24** | Review | — |
+| F-30 | HIGH | The acceptance tests (`v2_conformance_test`, `pipeline_soak_test`) had not run since 2026-09-23 — **FIXED 2026-10-24**, `make test` added | Review | — |
+| F-31 | HIGH | Detector failure accounting only worked for `psd_tonal`; `detector_ok` true with zero detectors — **FIXED 2026-10-24** | Review | — |
+| F-32 | HIGH | Repeated upload failure was a counter nobody watched, never a degradation or alert — **FIXED 2026-10-24** | Review | — |
+| F-33 | HIGH | Housekeeping drains and retries could starve the systemd watchdog; WhatsApp retry replayed forever — **FIXED 2026-10-24** | Review | — |
+| F-34 | HIGH | Push-only units received no remote config; a malformed signed config crash-looped behind healthy heartbeats — **FIXED 2026-10-24** | Review | — |
+| F-35 | MEDIUM | A single 401 stopped push and heartbeats until a restart nobody can trigger — **FIXED 2026-10-24** | Review | — |
+| F-36 | MEDIUM | Bench mode shipped as the template default and was about to leave `degraded_reason` with no trace — **FIXED 2026-10-24 (D-019)** | Review | — |
 | X-01 | — | Report claim that did not survive verification | Correction | Now |
 
 ---
@@ -480,12 +492,56 @@ Fixed by `POST /api/devices/heartbeat` (D-018): the device POSTs the same `statu
 
 Fix: journal (`installing → verifying → rollingback`, atomic writes) + local snapshot (rollback needs no network) + `.installed_sha` only on confirmation + boot-time recovery (`oceankind-ota-boot.service`, installed by `setup.sh`) + explicit error handling + single-instance lock + a maintenance window driven by the overlay state itself (`.sd_protection`), bounded to three boots and always ending with the overlay re-enabled. The script refuses to disable the overlay on a unit that lacks the boot unit. After the fix: 0 violations across every single cut and every double cut, and the harness fails when any of these defects is reintroduced. **Not closed:** torn writes and the overlay path on real hardware — `raspberry-pi/docs/OTA-FAULT-TESTING.md` §5. Deployed units need a one-time hands-on step to take the new script.
 
-### F-28 — Codec Zero audio *capture* is broken on the default provisioning OS image — upstream kernel bug, workaround documented
+### F-28 — Codec Zero ships with AUX IN capture fully muted — fixed
 
-Found 2026-10-24, provisioning a Codec Zero + Pi Zero 2W with `QUICKGUIDE.md` as written at the time. `arecord -l` showed the card enumerated correctly, `setup.sh`'s `dtoverlay=rpi-codeczero` was present and correct, `OCEANKIND_AUDIO_DEVICE_NAME=codec` matched it by name — every check this project had short of actually reading samples passed. Then `arecord -D hw:0,0 ...` failed with `read error: Input/output error`, and `dmesg` showed `bcm2835-i2s ...: FIFO clear timed out: no PCM clock (clock consumer with the provider not running?)`, repeating.
+Found 2026-10-24, provisioning a Codec Zero + Pi Zero 2W with `QUICKGUIDE.md` as written at the time. `arecord -l` showed the card enumerated correctly, `setup.sh`'s `dtoverlay=rpi-codeczero` was present and correct, `OCEANKIND_AUDIO_DEVICE_NAME=codec` matched it by name — every check this project had short of actually reading samples passed. Then `arecord -D hw:0,0 ...` failed with `read error: Input/output error`, and `dmesg` showed `bcm2835-i2s ...: FIFO clear timed out: no PCM clock` / `I2S SYNC error!`, repeating.
 
-Not ours: this matches [raspberrypi/linux#7692](https://github.com/raspberrypi/linux/issues/7692) exactly — DA7213/Codec Zero capture fails with `Input/output error` on kernel `6.18.39` and `6.18.50` (Raspberry Pi OS Lite/trixie, the current default image as of this writing), playback unaffected. The issue reporter already downgraded to `6.18.39` and got the byte-for-byte identical failure, so there is no known-good kernel inside trixie to pin to. The issue is open, unreplied, no fix as of this writing.
+**First suspected an upstream kernel regression** ([raspberrypi/linux#7692](https://github.com/raspberrypi/linux/issues/7692), a near-identical report, open and unreplied at the time) — reasonable from the evidence available, but wrong, and treated as more certain than it was before checking the cheaper explanation. The real cause: `amixer -c 0 contents` showed `Aux Switch`, `Mixin Left/Right Aux Switch`, `Mixin PGA Switch` and — critically — `ADC Switch` itself all **off** by default. Nothing in ALSA, `arecord`, PortAudio, or this project's own code ever enables them; the DA7213 codec simply boots with the whole AUX-in signal path muted, which is why the card enumerates and even opens, but the ADC never starts generating the clock the Pi's I2S peripheral is waiting for — manifesting as exactly the same "no PCM clock" / "SYNC error" symptom the kernel issue describes. **Confirmed identical on both the original kernel (`6.18.50`, trixie) and bookworm (`6.12`)** once the mixer state was actually checked — the kernel was never the variable.
 
-Also learned along the way: the exact ALSA card name is **not stable** across kernel/driver updates on the same physical board — seen as `IQaudIOCODEC`, then as `Zero [RPi Codec Zero]` after a system update — which is why `AUDIO_DEVICE_NAME`'s hint (`codec`) is a loose substring rather than an exact name (see D-009).
+Proof it's fixed, not just quieter: `arecord` after enabling the six controls ran clean (no I/O error), and a deliberate test signal (finger-touch on AUX IN) moved RMS from `1` to `16686` — the ADC is sampling real external signal, not muted silence.
 
-Workaround, not a fix: provision on **Raspberry Pi OS (Legacy) Lite** (Debian 12/bookworm, kernel 6.12) instead of the current default trixie image — predates the entire 6.18.x line this regression lives in. `QUICKGUIDE.md` step 1 updated to specify this explicitly, with a troubleshooting row for anyone who already flashed the wrong image. **Not closed:** depends entirely on an upstream fix landing in `raspberrypi/linux`; revisit `QUICKGUIDE.md`'s OS choice once that issue resolves, since staying on an increasingly old "Legacy" image indefinitely is its own cost.
+Fix: `setup.sh`'s generated `oceankind.service` unit now runs the six `amixer -c 0 cset ...` calls as `ExecStartPre=`, unconditionally (not `-`-guarded) — a missing control means the hardware no longer matches what D-009 committed to, and that should fail the service loudly, not start it muted. Verified surviving a full `systemctl daemon-reload` + restart, with the mixer state logged in the journal on every start.
+
+**Not fully closed:** the bench was re-flashed to Raspberry Pi OS (Legacy) Lite / bookworm partway through this investigation, before the mixer was identified as the actual cause — so the fix is proven on bookworm, kernel 6.12, but not yet re-proven on the original trixie/6.18.x image. The upstream kernel issue (#7692) may be the exact same misdiagnosis on the reporter's end, or a real separate regression — unknown either way. `QUICKGUIDE.md` still points at the Legacy image for now since that's what's actually been proven end to end; revisit once someone retests the mixer fix on trixie, since staying on an aging Legacy image indefinitely is its own cost.
+
+---
+
+## Found by the repository health review, 2026-10-24
+
+Full review in `../../FABLE_REPORT.md` (root of the workspace, not in this repo). Everything below was fixed in the same session ("Batch A"); each fix is covered by `tools/phase1_smoke_test.py` and `make test` runs all three offline tools.
+
+**F-04 status note.** The Twilio token was rotated on 2026-10-24 (client). The old credential is still present in plaintext and bytecode in the *root* `legacy/` tree outside this repo and in no file of this repo; deleting those copies is scheduled (review §2, R-03).
+
+### F-29 — A dead capture stream reported itself healthy — fixed
+
+`health.py` trimmed the duty-cycle window only inside `record_frames()` and the RMS window only inside `record_rms()`. When frames stop arriving nothing trims, so after an hour of uptime `duty_cycle_pct()` computed `span = min(now − start, 3600)` over a deque still holding 3600 s of frames: **frozen at ~100 % for as long as the process lived.** `audio_health()` took `max()` over stale samples → `audio_ok: true`. The PortAudio callback has no error path and `stream.active` was never checked; the classify thread beat the watchdog on every *empty* loop, so the watchdog saw a live thread; `detector_ok` counted only exceptions, of which a stream with no clips produces none. `ARCHITECTURE.md` stated the opposite ("a stalled capture callback reaches the fail-loud path"). This is the F-28 scenario (card enumerates, stream opens, no samples) wearing the health block's own clothes, and it is the exact failure the project exists to prevent.
+
+Fix: both windows are trimmed on read (`duty_cycle_pct`, `audio_health`); `duty_cycle_pct` returns `0.0`, not `null`, for a started-but-dead stream; `record_clip()` marks every assembled window and `capture_health()` degrades when `last_clip_age_s ≥ CAPTURE_STALL_S` (60 s) or duty < 90 %; `health.capture_ok` and `health.last_clip_age_s` are published (contract updated); `maybe_alert_capture()` sends one WhatsApp per episode. Smoke test §3b/§3c prove the windows go to zero and the reason appears.
+
+### F-30 — The acceptance tests did not run — fixed
+
+`tools/v2_conformance_test.py:98` and `tools/pipeline_soak_test.py:121` called `main.upload_status()`, removed on 2026-09-23 when `collect_status`/`write_status_blob` replaced it for the heartbeat split. `AttributeError` before any assertion, for a month, while `DATA-CONTRACT.md`, `README.md`, `BENCH.md` and `PROGRESS.md` cited them as the proof of the contracted work. Nothing ran them automatically. Fix: both tools updated; new `Makefile` (`make venv`, `make test`) runs compile + smoke + conformance + soak; `.venv/` gitignored. Run before every commit.
+
+### F-31 — Detector failure accounting only worked for `psd_tonal` — fixed
+
+`detectors/__init__.py` recorded success only for `psd_tonal` and failure for any detector into one shared counter, so `psd_tonal`'s success reset `ml_mfcc`'s failures on every clip: a second detector could throw on 100 % of clips and never escalate. With `OCEANKIND_DETECTORS=ml_mfcc` alone, three transient failures latched `detector_ok: false` forever. `detector_ok()` ignored whether anything had loaded; zero detectors gave `detectors: []` with `detector_ok: true`, against the contract's "false when no detector loaded". Fix: per-detector consecutive-failure counters and alert dedupe; the registry reports what loaded (`set_loaded_detectors`); `detector_ok` = at least one loaded and none over the limit; `degraded_reason` names the failing detector. Smoke §2b.
+
+### F-32 — Repeated upload failure never alarmed — fixed
+
+`storage.upload_bytes` caught everything and `log.warning`ed; `upload_backlog` was published and never entered `degraded_reason` or triggered an alert, although `raspberry-pi/CLAUDE.md` lists "repeated upload failure" as a must-alert and `BENCH.md` admitted the gap. A revoked storage credential meant 500 spooled events, then discards, with no human told. Fix: `note_upload_backlog()` on each heartbeat — backlog > 0 for 3 heartbeats, or ≥ half the spool cap, is a degradation with one alert per episode. Unreadable spool files are now counted in `events_dropped` instead of being deleted silently, and a malformed spool item can no longer raise out of the drain. Smoke §11/§12.
+
+### F-33 — Housekeeping could starve the watchdog into a restart loop — fixed
+
+`watchdog.tick()` ran once per housekeeping iteration against `WatchdogSec=120`. On that same path: `retry_pending_whatsapp()` (up to 50 alerts × recipients × 15 s), `drain_event_spool()` (500 × 60 s), `drain_push_spool()` (500 × 10 s) and an untimed IoT Hub `connect()` *before* capture started. Any of them could exceed 120 s on a bad link and systemd would kill a healthy unit in mid-recovery; the WhatsApp retry persisted its attempt counter only after the loop, so the kill replayed the same 50 alerts, forever, while Twilio was down. The OTA's `restart_and_verify` compares `NRestarts`, so one such kill in its 60 s window rolled back a good build. Fix: all three take a time budget (`HOUSEKEEPING_BUDGET_S`, 30 s) and tick the watchdog between items; the WhatsApp attempt is persisted before each send; IoT Hub is off by default (`OCEANKIND_IOTHUB_ENABLED=1` to enable) and connects in a helper thread with a 10 s timeout, after capture has started; degradation alerts from the classify thread are queued and sent by housekeeping.
+
+### F-34 — Push-only units were not remotely tunable; a malformed config crash-looped — fixed
+
+`main.py` polled remote configuration only `if C.STORAGE_ENABLED`, so every unit provisioned by `QUICKGUIDE.md` (push-only, no Azure, no `OUTPUT_DIR`) received no remote configuration at all, against the "every threshold remotely tunable without a firmware update" obligation (D-014, D-015). Separately only `ConfigRejected` was caught; a signed document with a non-numeric value (`float()` → `ValueError`) or a non-object body (`.get` → `AttributeError`) exited the process; systemd restarted it 15 s later; the heartbeat branch runs first and published `degraded_reason: null`; then it crashed again — a crash loop that looked like health. Fix: push-only units poll `GET /api/devices/config` (`push.fetch_config`), the same signed document byte for byte; the whole poll is under `except Exception` → `set_config_error`. Contract updated (§Device configuration).
+
+### F-35 — A single 401 silenced the unit until a restart — fixed
+
+`push._auth_failed` latched forever; `post_heartbeat` returned immediately while set. A transient 401 (backend deploying with its database down) left the unit mute with no signal but absence. Fix: the latch lifts once per `AUTH_RETRY_S` (3600 s) for a single probe and re-latches on another 401.
+
+### F-36 — Bench mode as the default, with its last trace about to disappear — fixed (D-019)
+
+`setup.sh`'s template shipped `OCEANKIND_ALLOW_NO_TWILIO=1` **on**, and the pending `health.py` change (now landed) removed the "sin credenciales Twilio" `degraded_reason` in favour of the `alerts_enabled` boolean. A production unit left on the template default would have reported `degraded_reason: null` with no way to reach a human, and correctness would have depended entirely on the dashboard rendering one boolean. Fix: `OCEANKIND_BENCH=1` declares a bench; `ALLOW_NO_TWILIO=1` combined with a backend URL or Azure storage **refuses to start** unless `BENCH=1` is set. The `setup.sh` template ships the two lines together with the instruction to delete both when Twilio credentials arrive, and step 7a appends `BENCH=1` to an existing env file that has `ALLOW_NO_TWILIO=1` without it, so re-running `setup.sh` migrates older units; the OTA path does not (see `raspberry-pi/docs/TODO.md`).

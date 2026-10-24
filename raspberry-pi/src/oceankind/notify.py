@@ -7,9 +7,9 @@ cada envío falla A GRITOS en el log, jamás en silencio.
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 from . import config as C
 
@@ -102,7 +102,23 @@ def pending_alert_count() -> int:
         return 0
 
 
-def retry_pending_whatsapp() -> None:
+def _write_pending(pending: list) -> None:
+    if pending:
+        C.PENDING_ALERTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        C.PENDING_ALERTS_FILE.write_text(json.dumps(pending, indent=2))
+    else:
+        C.PENDING_ALERTS_FILE.unlink(missing_ok=True)
+
+
+def retry_pending_whatsapp(budget_s: float | None = None, keepalive=None) -> None:
+    """Reintenta las alertas que no salieron. Corre en housekeeping, el hilo que
+    pingea al watchdog, así que: (1) `budget_s` acota la pasada — 50 alertas ×
+    destinatarios × 15 s de timeout sin tope superaban WatchdogSec y systemd
+    mataba el servicio; (2) el intento se contabiliza y PERSISTE antes de
+    intentarlo — antes se guardaba al final de la pasada, así que un reinicio a
+    mitad de camino volvía a intentar las mismas 50 con el contador en cero,
+    para siempre, mientras Twilio siguiera caído. `keepalive` (watchdog.tick)
+    se llama entre alertas."""
     if not C.PENDING_ALERTS_FILE.exists():
         return
     try:
@@ -111,9 +127,28 @@ def retry_pending_whatsapp() -> None:
         return
     if not pending:
         return
+    if not C.TWILIO_CONFIGURED:
+        # Sin Twilio nada puede salir; gastar intentos aquí solo descartaría
+        # alertas que sí saldrían cuando haya credenciales.
+        log.error("%d alerta/s pendiente/s y sin credenciales Twilio — se conservan", len(pending))
+        return
     log.info("Reintentando %d alerta/s pendiente/s...", len(pending))
-    still_pending = []
+    deadline = time.monotonic() + budget_s if budget_s else None
+    remaining = list(pending)
     for alert in pending:
+        if deadline is not None and time.monotonic() > deadline:
+            log.info("  reintentos: presupuesto de %.0f s agotado — %d quedan para la próxima pasada",
+                     budget_s, len(remaining))
+            break
+        if keepalive:
+            keepalive()
+        alert["attempts"] = alert.get("attempts", 1) + 1
+        if alert["attempts"] > 10:
+            log.warning("  Alerta descartada tras 10 intentos: %s", alert.get("timestamp"))
+            remaining = [a for a in remaining if a is not alert]
+            _write_pending(remaining)
+            continue
+        _write_pending(remaining)          # el intento queda contado ANTES de intentarlo
         try:
             audio_url = (f"{C.DASHBOARD_URL}?play={alert['blob_name']}"
                          if alert.get("blob_name") else C.DASHBOARD_URL)
@@ -125,16 +160,12 @@ def retry_pending_whatsapp() -> None:
                 audio_url,
             ), recipients=C.TO_ALERTA)
             log.info("  → Alerta pendiente reenviada: %s", alert.get("timestamp"))
-        except Exception:
-            alert["attempts"] = alert.get("attempts", 1) + 1
-            if alert["attempts"] < 10:
-                still_pending.append(alert)
-            else:
-                log.warning("  Alerta descartada tras 10 intentos: %s", alert.get("timestamp"))
-    if still_pending:
-        C.PENDING_ALERTS_FILE.write_text(json.dumps(still_pending, indent=2))
-    else:
-        C.PENDING_ALERTS_FILE.unlink(missing_ok=True)
+            remaining = [a for a in remaining if a is not alert]
+            _write_pending(remaining)
+        except Exception as exc:
+            log.warning("  reintento falló (%s, intento %d): %s",
+                        alert.get("timestamp"), alert["attempts"], exc)
+    _write_pending(remaining)
 
 
 def send_whatsapp(rms: float, peak_db: float, clip_rel: str | None = None,
@@ -156,7 +187,7 @@ def send_whatsapp(rms: float, peak_db: float, clip_rel: str | None = None,
         ), recipients=C.TO_ALERTA)
         log.info("  → WhatsApp enviado a %s", C.TWILIO_TO)
     except ImportError:
-        log.warning("twilio no instalado — corre: pip3 install twilio --break-system-packages")
+        log.error("twilio no instalado en el venv del servicio — revisar requirements.txt / setup.sh")
     except Exception as exc:
         log.warning("Error WhatsApp: %s — guardando en buffer local", exc)
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -260,22 +291,42 @@ def maybe_trigger_cluster_call() -> None:
 # ─── IoT Hub (rama muerta conocida — nada la consume; ver TODO) ──────────────
 
 def build_iot_client():
-    if not C.IOTHUB_CONNECTION_STRING:
-        log.warning("OCEANKIND_IOTHUB_CONNECTION_STRING no definida — continuando sin IoT Hub.")
+    """Apagado por defecto (OCEANKIND_IOTHUB_ENABLED=1 para encender). connect()
+    del SDK no tiene timeout y bloqueaba el arranque de la captura si el hub no
+    respondía: aquí corre en un hilo auxiliar con tope, y si no vuelve a tiempo
+    se sigue sin IoT Hub (el hilo queda abandonado; es daemon)."""
+    if not C.IOTHUB_ENABLED:
+        if C.IOTHUB_CONNECTION_STRING:
+            log.info("IoT Hub: connection string presente pero OCEANKIND_IOTHUB_ENABLED≠1 — "
+                     "rama apagada (nada la consume; ver TODO.md)")
         return None
     try:
         from azure.iot.device import IoTHubDeviceClient  # noqa: PLC0415
     except ImportError:
         log.warning("azure-iot-device no instalado — continuando sin IoT Hub.")
         return None
-    try:
-        client = IoTHubDeviceClient.create_from_connection_string(C.IOTHUB_CONNECTION_STRING)
-        client.connect()
-        log.info("Conectado a Azure IoT Hub ✓")
-        return client
-    except Exception as exc:
-        log.warning("No se pudo conectar a IoT Hub: %s — continuando sin IoT Hub.", exc)
+    result: dict = {}
+
+    def _connect():
+        try:
+            client = IoTHubDeviceClient.create_from_connection_string(C.IOTHUB_CONNECTION_STRING)
+            client.connect()
+            result["client"] = client
+        except Exception as exc:      # noqa: BLE001
+            result["error"] = exc
+
+    t = threading.Thread(target=_connect, name="iothub-connect", daemon=True)
+    t.start()
+    t.join(C.IOTHUB_CONNECT_TIMEOUT_S)
+    if t.is_alive():
+        log.warning("IoT Hub: connect() no respondió en %.0f s — continuando sin IoT Hub.",
+                    C.IOTHUB_CONNECT_TIMEOUT_S)
         return None
+    if "error" in result:
+        log.warning("No se pudo conectar a IoT Hub: %s — continuando sin IoT Hub.", result["error"])
+        return None
+    log.info("Conectado a Azure IoT Hub ✓")
+    return result.get("client")
 
 
 def send_iot_message(client, audio_level: float, peak_db: float,

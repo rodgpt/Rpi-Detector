@@ -107,7 +107,7 @@ def build_status(session_start: datetime, alert_count: int, last_rms: float,
 
 def collect_status(session_start: datetime, alert_count: int, last_rms: float) -> tuple[dict, dict]:
     """Sensores + status.json v2, en un solo lugar, UNA vez por tick de
-    heartbeat (D-0xx: antes esto vivía dentro de `upload_status`, que solo se
+    heartbeat (D-018: antes esto vivía dentro de `upload_status`, que solo se
     llamaba con almacenamiento activo — el POST al backend §Device heartbeat
     no depende de eso y necesita los mismos datos, así que la recolección se
     separó de la subida). El resultado se reusa para el POST, el blob (si hay
@@ -148,7 +148,10 @@ def main() -> None:
              cfg["psd_threshold_db"], cfg["psd_f_min"], cfg["psd_f_max"], cfg["cooldown_s"])
     if not C.STORAGE_ENABLED:
         log.warning("Sin almacenamiento configurado (ni Azure ni OUTPUT_DIR) — "
-                    "eventos solo en log y WhatsApp")
+                    "eventos solo en log, WhatsApp y push al backend; la config remota "
+                    "se consulta vía GET /api/devices/config")
+    if C.BENCH:
+        log.warning("⚠️  OCEANKIND_BENCH=1 — unidad declarada como banco de pruebas")
     if push.enabled():
         log.info("Push de eventos al backend: ACTIVO → %s (timeout %.0fs)",
                  C.BACKEND_URL, C.BACKEND_TIMEOUT_S)
@@ -160,8 +163,7 @@ def main() -> None:
         storage.publish_site_registry()
         storage.ensure_aux_blobs()
 
-    iot = notify.build_iot_client()
-    pipe = pl.Pipeline(iot)
+    pipe = pl.Pipeline(None)
     source = capture.make_source(pipe.block_queue)
 
     stop = threading.Event()
@@ -173,10 +175,15 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _sig)
     signal.signal(signal.SIGINT, _sig)
 
+    # La captura arranca ANTES de cualquier red: IoT Hub (connect sin timeout
+    # en el SDK) y los reintentos de WhatsApp iban antes y, con el hub o Twilio
+    # colgados, la unidad reiniciaba por watchdog sin haber escuchado un segundo.
     pipe.start()
     source.start()
     watchdog.arm()
-    notify.retry_pending_whatsapp()
+    iot = notify.build_iot_client()
+    pipe.iot_client = iot
+    notify.retry_pending_whatsapp(budget_s=C.HOUSEKEEPING_BUDGET_S, keepalive=watchdog.tick)
 
     session_start = datetime.now(timezone.utc)
     last_status = last_power = last_config = last_wa_hb = 0.0
@@ -190,7 +197,14 @@ def main() -> None:
 
             if now - last_status >= hb:
                 health.maybe_alert_audio_health()   # R-2.2: hidrófono muerto suena
-                push.drain_push_spool()
+                health.maybe_alert_capture()        # F-29: stream muerto suena
+                health.note_upload_backlog()        # subidas fallando suenan
+                health.flush_degraded_alerts()
+                watchdog.tick()
+                # Drenados con presupuesto y keepalive: este hilo es el que
+                # pingea al watchdog; una recuperación larga no puede parecer
+                # un cuelgue.
+                push.drain_push_spool(budget_s=C.HOUSEKEEPING_BUDGET_S, keepalive=watchdog.tick)
 
                 # Recolección UNCONDICIONAL — el POST de heartbeat (§Device
                 # heartbeat) no depende de almacenamiento; antes esto entero
@@ -211,7 +225,11 @@ def main() -> None:
                 if C.STORAGE_ENABLED:
                     # Independiente de la recolección de arriba (siempre corría
                     # así, incluso si upload_status fallaba — no acoplar).
-                    storage.drain_event_spool()
+                    try:
+                        storage.drain_event_spool(budget_s=C.HOUSEKEEPING_BUDGET_S,
+                                                  keepalive=watchdog.tick)
+                    except Exception as exc:
+                        log.warning("  Error drenando el spool de eventos: %s", exc)
                     if status is not None:
                         try:
                             write_status_blob(status, pipe.alert_count, pipe.last_rms)
@@ -239,34 +257,53 @@ def main() -> None:
                         s["stats"], s["modem"], s["solar"],
                         telemetry.compute_system_load(s["solar"]),
                         health.audio_status_str())
-                    notify.retry_pending_whatsapp()
+                    notify.retry_pending_whatsapp(budget_s=C.HOUSEKEEPING_BUDGET_S,
+                                                  keepalive=watchdog.tick)
                     last_wa_hb = now
 
-            if C.STORAGE_ENABLED and now - last_config >= C.CONFIG_CHECK_INTERVAL:
-                payload = storage.download_json(storage.site_path("remote_config.json"))
-                # Blob inalcanzable o config_version sin cambios: se mantiene la
-                # última config válida. Jamás se cae a defaults (contrato:
-                # "stale and detecting beats fresh and silent").
-                if payload and payload.get("config_version") != applied_config_version:
-                    try:
-                        values = C.verify_remote_config(payload)
-                    except C.ConfigRejected as exc:
-                        # Rechazo = evento de salud, no línea de debug.
-                        health.set_config_error(str(exc))
-                        if payload.get("config_version") != rejected_config_version:
-                            log.error("⚙️  Config remota RECHAZADA entera: %s", exc)
-                            rejected_config_version = payload.get("config_version")
+            if now - last_config >= C.CONFIG_CHECK_INTERVAL and (C.STORAGE_ENABLED or push.enabled()):
+                # Todo el ciclo bajo try: un documento firmado pero malformado
+                # (un valor no numérico, un JSON que no es objeto) levantaba
+                # ValueError/AttributeError fuera de ConfigRejected, tumbaba el
+                # proceso, systemd lo levantaba, el heartbeat salía sano y
+                # volvía a caer — un crash loop que parecía salud.
+                try:
+                    if C.STORAGE_ENABLED:
+                        payload = storage.download_json(storage.site_path("remote_config.json"))
                     else:
-                        if values is not None:   # None = dirigida a otra unidad
-                            changes = C.CONFIG.apply(values)
-                            health.set_config_error(None)
-                            applied_config_version = payload.get("config_version")
-                            rejected_config_version = None
-                            log.info("⚙️  Config remota %r aplicada: %s",
-                                     applied_config_version,
-                                     "; ".join(changes) if changes else "sin cambios efectivos")
+                        # Push-only: el mismo documento firmado, vía backend
+                        # (D-020 lo sirve byte a byte). Sin esto, una unidad sin
+                        # almacenamiento no era afinable sin firmware (D-014/15).
+                        payload = push.fetch_config()
+                    # Fuente inalcanzable o config_version sin cambios: se mantiene
+                    # la última config válida. Jamás se cae a defaults (contrato:
+                    # "stale and detecting beats fresh and silent").
+                    if (isinstance(payload, dict)
+                            and payload.get("config_version") != applied_config_version):
+                        try:
+                            values = C.verify_remote_config(payload)
+                        except C.ConfigRejected as exc:
+                            # Rechazo = evento de salud, no línea de debug.
+                            health.set_config_error(str(exc))
+                            if payload.get("config_version") != rejected_config_version:
+                                log.error("⚙️  Config remota RECHAZADA entera: %s", exc)
+                                rejected_config_version = payload.get("config_version")
+                        else:
+                            if values is not None:   # None = dirigida a otra unidad
+                                changes = C.CONFIG.apply(values)
+                                health.set_config_error(None)
+                                applied_config_version = payload.get("config_version")
+                                rejected_config_version = None
+                                log.info("⚙️  Config remota %r aplicada: %s",
+                                         applied_config_version,
+                                         "; ".join(changes) if changes else "sin cambios efectivos")
+                except Exception as exc:    # noqa: BLE001
+                    health.set_config_error(f"error procesando config remota: {exc}")
+                    log.error("⚙️  Config remota: error inesperado (%s) — se mantiene la última "
+                              "config válida", exc)
                 last_config = now
 
+            health.flush_degraded_alerts()   # avisos encolados por otros hilos (clasificador)
             watchdog.tick()   # pingea a systemd SOLO si los hilos laten (R-2.7)
             stop.wait(timeout=1.0)
     finally:

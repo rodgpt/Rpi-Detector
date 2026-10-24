@@ -8,7 +8,7 @@ The device emits it, verified end to end by `raspberry-pi/tools/v2_conformance_t
 
 Derived by walking the five dashboard tabs, listing every field each one consumes, and working backwards. Client has confirmed the blob shape is ours to define.
 
-Last updated 2026-08-26 (**Event upload** added — dashboard D-022).
+Last updated 2026-10-24 (`health.capture_ok` / `last_clip_age_s` added; `detector_ok` semantics tightened; config delivery for push-only units via `GET /api/devices/config` — F-29, F-31, F-34). Previous: 2026-09-23 (**Device heartbeat**), 2026-08-26 (**Event upload** — dashboard D-022).
 
 **Implementation notes, normative for consumers:**
 
@@ -228,16 +228,37 @@ This section is the shape of the document. **Device heartbeat**, below, is how i
   "uptime_seconds":   191700,       // process
   "system_uptime_s":  432000,       // since boot
 
-  "health": {                       // NEW. the fail-loud surface
-    "detector_ok":    true,         // false when no detector loaded. F-02
-    "audio_ok":       true,         // false when peak RMS stayed below floor. already on device
-    "duty_cycle_pct": 99.4,         // F-05. measured, not asserted
-    "clips_dropped":  0,            // bounded-queue drops
-    "upload_backlog": 0,            // events awaiting upload
+  "health": {                       // the fail-loud surface. every counter is ALWAYS present
+    "detector_ok":    true,         // false when no detector loaded, or when any loaded detector
+                                     // failed DETECTOR_FAIL_LIMIT clips in a row (per detector,
+                                     // D-014; F-02, F-31)
+    "audio_ok":       true,         // false when peak RMS stayed below floor over the window
+    "capture_ok":     true,         // false when no audio window has been assembled for
+                                     // CAPTURE_STALL_S (60 s) or duty fell under 90 %. F-29:
+                                     // a dead stream raises no exception; this is what sees it
+    "duty_cycle_pct": 99.4,         // F-05. measured, not asserted. 0.0 = capture dead;
+                                     // null only before the first second
+    "deaf_seconds_total": 1.2,      // wall-clock seconds without audio since capture start
+    "last_clip_age_s": 2.0,         // seconds since the last 5 s window was assembled
+    "clips_dropped":  0,            // bounded-queue drops (block queue, archive, transport)
+    "capture_overflows": 0,         // PortAudio overflows + block-queue drops
+    "suppressed_count": 0,          // detections recorded with notification suppressed (D-008)
+    "upload_backlog": 0,            // events awaiting upload (spool). Degrades after 3
+                                     // heartbeats > 0 or at half the spool cap (F-32)
+    "events_dropped": 0,            // events lost to the spool cap or an unreadable spool file
+    "push_enabled":   true,         // OCEANKIND_BACKEND_URL set
+    "push_backlog":   0,            // pushes awaiting retry
+    "push_rejected":  0,            // terminal 400/403 from the backend
+    "push_dropped":   0,            // pushes lost to the push-spool cap
+    "heartbeat_fail_streak": 0,     // consecutive failed heartbeat POSTs (degrades at 3)
+    "wa_pending":     0,            // WhatsApp alerts awaiting retry
+    "archive_queue":  12,           // clips in the local archive sample queue
     "alerts_enabled": true,         // false in bench mode (OCEANKIND_ALLOW_NO_TWILIO=1). Not a
                                      // degradation — a unit can be fully operational with this
                                      // false, so it must never appear in `degraded_reason`
-    "degraded_reason": null         // human-readable when anything above is false
+                                     // (Rpi-Detector D-019)
+    "degraded_reason": null         // human-readable when anything above is false. The device
+                                     // also sends ONE WhatsApp per degradation episode
   },
 
   "detection": {                    // what is actually running, not ML-era names
@@ -343,7 +364,9 @@ One signed blob, written by the backend, read by the device. It is in this docum
 sites/{site_id}/remote_config.json        written by the backend. read-only to the device
 ```
 
-The device polls it every `CONFIG_CHECK_INTERVAL` (300 s), on the transport path, never the capture path, with an explicit timeout (R-5.5). It applies a document only when `config_version` differs from the one in force.
+The device polls it every `CONFIG_CHECK_INTERVAL` (300 s), on the housekeeping thread, never the capture path, with an explicit timeout (R-5.5). It applies a document only when `config_version` differs from the one in force.
+
+**Delivery depends on the deployment mode (2026-10-24, F-34).** A unit with storage configured reads the blob. A **push-only** unit (no Azure, no `OUTPUT_DIR` — the `QUICKGUIDE.md` provisioning path) has no blob to read, so it polls `GET /api/devices/config` with its device credential instead; the backend serves the blob byte for byte (D-020), so the document, the signature check and the clamping are identical on both paths. Before this, push-only units received no remote configuration at all, which violated the "every threshold remotely tunable without a firmware update" obligation (D-014, D-015). A malformed-but-signed document (non-numeric value, non-object JSON) is a `health.degraded_reason` event, never a crash: it was a crash loop that published a healthy heartbeat between restarts.
 
 ### Document
 
@@ -419,7 +442,7 @@ There is no expiry. A configuration stays in force until a document with a diffe
 
 | | Device (`oceankind/config.py`) | Backend (`routers/devices.py`) | Contract |
 |---|---|---|---|
-| Transport | reads `sites/{site}/remote_config.json` | **writes the blob.** `GET /api/devices/config` is a read-only debug view returning it byte for byte | the blob |
+| Transport | reads `sites/{site}/remote_config.json`; **push-only units** read `GET /api/devices/config` instead ✓ | **writes the blob.** `GET /api/devices/config` returns it byte for byte and is the delivery path for push-only units | the blob, served two ways |
 | Version key | `config_version` ✓ | `config_version` | `config_version` |
 | Signature covers | whole document minus `signature` ✓ | whole document minus `signature` | whole document minus `signature` |
 | Key name | `OCEANKIND_CONFIG_HMAC_KEY` | `OCEANKIND_CONFIG_HMAC_KEY` | `OCEANKIND_CONFIG_HMAC_KEY` |
@@ -432,7 +455,7 @@ Device additions beyond the four convergence items, per the prose above: `detect
 
 The remaining provisioning step: **generate the shared key and put it in both places** (backend secret store, device `/etc/oceankind.env`). Until then the backend refuses to publish and the device refuses to apply, which fails safe on both ends.
 
-The blob is normative because the device side is verified and shipping, and because it needs no device credential to exist first (D-017, D-018 are about a different problem). `GET /api/devices/config` may stay as a read-only debugging view, but it must return this exact document, and the backend must gain the writer that puts it in storage.
+The blob is normative because the device side is verified and shipping, and because it needs no device credential to exist first (D-017, D-018 are about a different problem). `GET /api/devices/config` must return this exact document — it is a debugging view for storage units and the only delivery path for push-only units (2026-10-24), so the two can never be allowed to diverge. The backend writer that publishes the blob exists (`services/deviceconfig.publish`, `PUT /api/admin/devices/{id}/config`).
 
 ---
 
@@ -569,6 +592,7 @@ Every accepted heartbeat writes both tables: `DeviceStatus` is upserted (current
 | `202`, `accepted: true` | Stored | Nothing further — next heartbeat is a new tick regardless |
 | `202`, `accepted: false` | Stale or duplicate, ignored | Nothing — this is not an error, and never retried anyway |
 | `400` | Missing or naive `last_seen` | A device-side bug. Log loudly, do not retry this one |
+| `400` | `last_seen` more than 300 s ahead of the backend's clock (2026-10-24) | The device clock is wrong (no RTC, NTP not reached). Log the body; the fail streak degrades the unit, which is the honest outcome. The backend will not store a reading no correct heartbeat could later beat, and it measures silence from its own receive time, never from this field |
 | `401` | Bad or revoked credential | Same handling as **Event upload**'s `401` — stop, surface in `health.degraded_reason` |
 | `5xx`, timeout, connection refused | Backend down, deploying, or unreachable | Log, increment the fail streak, do **not** retry or spool |
 

@@ -14,7 +14,9 @@ Phased build plan. Each phase produces something runnable. Requirement IDs refer
 **Phase 4 device side done early (2026-08-13, D-016).** v2 only, new storage, prototypes frozen. Verified by `tools/v2_conformance_test.py`. Open: index tags (needs Azure), dashboard v2 reader (their side, deferred by client).
 **Heartbeat POST built 2026-09-23 (D-018).** Liveness no longer depends on storage being configured — `status.json` also goes direct to `POST /api/devices/heartbeat`, backend-enforced monotonic, with a `DeviceStatusHistory` trend table. See contract §Device heartbeat.
 
-Entry point unchanged for systemd: `marfutura_iot_audio.py` → `oceankind.main`. Next in queue: **Phase 3, detector registry** (the two-model harness), now unblocked because detection runs on its own worker.
+**Fail-loud hardening 2026-10-24 (repo health review, F-29…F-36).** A dead capture stream now reads as `capture_ok: false` / duty 0 with an alert (it read 100 % healthy before); detector accounting is per detector; failing uploads degrade and alert; housekeeping drains are time-budgeted so the watchdog cannot kill a recovering unit; push-only units get remote config via `GET /api/devices/config`; bench mode is declared with `OCEANKIND_BENCH=1` (D-019). The three offline tools had been broken since 2026-09-23 and are fixed; `make test` runs them. **Open:** re-run the bench soak with a deliberately pulled audio device and confirm the WhatsApp degradation arrives within 60 s; add `OCEANKIND_BENCH=1` to every unit provisioned from QUICKGUIDE before updating it.
+
+Entry point unchanged for systemd: `marfutura_iot_audio.py` → `oceankind.main`. Phase 3 (detector registry) is complete; next in queue is the bench soak (Phase 2 open item) and the hardware re-proof of the OTA (Phase 5).
 
 ---
 
@@ -61,6 +63,17 @@ Needs no Azure, no hardware, no client. Highest risk removed per hour in the who
 - [x] Fix `scripts/setup.sh` entry point (R-7.2, F-11) — installs `src/marfutura_iot_audio.py`, real env template
 - [x] Make provisioning and SD protection agree on the service user (R-7.4, F-17) — identical resolution expression in both
 - [ ] Clean provision on the bench Zero 2W produces a working unit — **needs bench time**
+
+### Fail-loud hardening (2026-10-24, review findings F-29…F-36)
+- [x] Dead capture stream degrades within `CAPTURE_STALL_S` and alerts; health windows trimmed on read; `capture_ok`, `last_clip_age_s` published (F-29)
+- [x] Per-detector failure accounting; `detector_ok` false with zero detectors loaded (F-31, D-014)
+- [x] Upload backlog is a degradation after 3 heartbeats; unreadable spool files counted (F-32)
+- [x] Housekeeping drains/retries time-budgeted and watchdog-ticked; WhatsApp attempts persisted before sending; IoT Hub off by default with a connect timeout; capture starts before any network call (F-33)
+- [x] Remote config for push-only units via the backend; malformed config is a health event, not a crash (F-34)
+- [x] 401 latch lifts for one probe per hour (F-35)
+- [x] `OCEANKIND_BENCH=1` declaration; `ALLOW_NO_TWILIO` + backend refuses to start without it (F-36, D-019)
+- [x] `v2_conformance_test.py` and `pipeline_soak_test.py` run again; `Makefile` with `make test` (F-30)
+- [ ] Bench proof: pull the Codec Zero (or `OCEANKIND_AUDIO_SOURCE=device` with no card) on a running unit and confirm `capture_ok: false` + WhatsApp within 60 s — **needs bench time**
 
 **Done when:** the device can no longer detect nothing while reporting itself healthy, and every event it detects is recorded. *Code satisfies both; the bench run proves it.*
 

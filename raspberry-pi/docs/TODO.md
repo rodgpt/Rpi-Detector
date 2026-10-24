@@ -16,7 +16,7 @@ Categories: `[HW]` `[SW]` `[Audio]` `[Power]` `[Config]` `[OTA]` `[Net]` `[Sec]`
 
 - [ ] **[Audio] Two hydrophones, no spatial use** — Two Aquarian H5 units are deployed and nothing uses the difference between them. Time delay between channels is a bearing estimate for free, and would also be a strong false-positive filter, since a real distant blast arrives at both with a consistent delay and local noise does not.
 
-- [ ] **[SW] IoT Hub limb is dead weight** — The Pi connects to Azure IoT Hub and sends alerts and heartbeats. Nothing consumes them. It costs a network call inside the deaf window on every alert and every heartbeat. Either revive it as part of the D-003 backend decision or remove it. `src/marfutura_iot_audio.py:868-908`
+- [ ] **[SW] IoT Hub limb is dead weight** — The Pi can connect to Azure IoT Hub and send alerts and heartbeats. Nothing consumes them. **Since 2026-10-24 it is off by default** (`OCEANKIND_IOTHUB_ENABLED=1` plus the connection string to enable; connect has a 10 s timeout and runs after capture starts — F-33). Remaining decision: remove the code and the `azure-iot-device` dependency outright, or keep it for the D-003 backend. `src/oceankind/notify.py` (`build_iot_client`, `send_iot_message`).
 
 - [ ] **[SW] IoT Hub payload still v1-ish** — `send_message` sends flat alert/heartbeat JSON that predates the v2 contract. Nothing consumes it (see the dead-limb item), so it was left alone in the cutover; if the D-003 backend revives IoT Hub, redesign the payload then.
 
@@ -35,13 +35,25 @@ Categories: `[HW]` `[SW]` `[Audio]` `[Power]` `[Config]` `[OTA]` `[Net]` `[Sec]`
 
 - [ ] **[Sec] `ensure_aux_blobs` must degrade, not fail, without read permission** — `storage.py:239-257` calls `blob_exists()` on the two aux stubs. Under D-017 that read may be denied. `blob_exists()` already returns `None` on error and the guard is `is False`, so it fails safe (skips the write) — confirm that stays true and that a permission denial is logged rather than swallowed, since it is the one D-017 read that is genuinely droppable.
 
-- [ ] **[Sec] `.bak` and `.pyc` still hold the live token** — In `../../legacy/build-artifacts/`. Harmless the moment the token is rotated, dangerous until then. There is no version control here, so the `.bak` is currently the only record of the pre-June state. Delete it after rotation, or keep it knowingly.
+- [ ] **[Sec] `.bak` and `.pyc` still hold the OLD token** — **Token rotated 2026-10-24.** The copies live in the workspace-root `legacy/` tree (outside this repo: `legacy/build-artifacts/`, `legacy/raspberry-pi/src/`, `legacy/superseded-monolith/`, `legacy/_z_Original…/`), ten files in all, plus `raspberry-pi/oceankind.env` on the dev machine (gitignored, but mode 644 — `chmod 600` it). Keep one reference copy of the old credential outside any repo tree and delete the rest (review R-03, Batch D).
 
 - [ ] **[DX] Extend the smoke test into a Phase 2 regression check** — `tools/phase1_smoke_test.py` (added 2026-08-12) covers classify_clip on synthetic tonal/impulse audio, detector-failure accounting, duty-cycle arithmetic, the health block and JSON sanitisation. Before the Phase 2 refactor, capture its classifier outputs as golden values so the module split provably does not change classification.
 
 - [ ] **[DX] `tools/` shares the production dependency set** — `predict.py` and `test_model_on_alerts.py` pull librosa and scikit-learn. Fine on a workstation. Worth a note in the future `requirements.txt` so nobody installs the tools' needs onto a 512 MB device.
 
 - [ ] **[HW] Enclosure, cabling and thermal are undocumented** — Nothing in this repository describes the physical installation. If someone has to visit the site, there is no reference for what is there. Belongs in `HARDWARE.md` once someone with access can photograph it.
+
+- [ ] **[Prov] Units provisioned before 2026-10-24 get `OCEANKIND_BENCH=1` when `setup.sh` is re-run** — D-019: `ALLOW_NO_TWILIO=1` together with `BACKEND_URL` refuses to start unless the unit declares itself a bench. `setup.sh` step 7a appends the line to an existing `/etc/oceankind.env` that has the first and lacks the second, so the documented update path (`git pull`, re-run `setup.sh`) handles it. **Still open:** `update_oceankind.sh` (the OTA) does not run that migration, so a unit updated over the air without a `setup.sh` run will refuse to start and say why. Either have the OTA run the env migration too, or re-run `setup.sh` once on each existing unit before the OTA carries this build.
+
+- [ ] **[SW] Capture does not restart itself when the stream dies** — F-29 made a dead stream *visible* (`capture_ok: false`, duty 0, WhatsApp). It does not yet *recover*: housekeeping should check `stream.active` and re-detect the device by name, with a bounded retry, so a USB re-enumeration or driver hiccup heals without a service restart. Also: `capture.find_device()` falling back to the system default input when no name matches is still fail-quiet — it should degrade and retry instead (review DEV-09c).
+
+- [ ] **[DX] Run `make test` in CI** — the Makefile exists (F-30); nothing runs it on push yet. A GitHub Actions workflow with `make venv test` on ubuntu is ~20 lines and would have caught the month-long breakage.
+
+- [ ] **[SW] Timestamps: `captured_utc` is window-assembly time, not capture start** — `pipeline.py` stamps `datetime.now()` when the 5 s window is assembled (end of window plus up to ~20 s of block-queue backlog); the contract says capture time. Derive it from the frame count since stream start. Likewise a drained spool event keeps its original `uploaded_utc` (review DEV-09e).
+
+- [ ] **[SW] `signal_rssi` is a bars→dBm lookup, not a measurement** — `telemetry.py` requests `lte_rsrp,lte_rsrq,rssi` from the modem and ignores them. Parse the real value or publish `null` (review DEV-09f).
+
+- [ ] **[DX] `inject_event.py` writes non-conformant events** — `uuid4().hex` (no dashes, fails the validator's regex) and `--label MOTOR` passed as `event_type` (outside the enum). It is run against the production backend per QUICKGUIDE §6 (review DEV-09g).
 
 ---
 
@@ -51,6 +63,14 @@ Categories: `[HW]` `[SW]` `[Audio]` `[Power]` `[Config]` `[OTA]` `[Net]` `[Sec]`
   Format: - [x] **[Category] Title** DONE (YYYY-MM-DD) — how it was resolved.
 -->
 
+- [x] **[SW] A dead capture stream reported 100 % duty and `audio_ok: true`** DONE (2026-10-24, F-29) — found by the repository health review, not on the bench: `health.py` trimmed both moving windows only when new data arrived, so when the stream died they froze at their last healthy value. Trim on read, `record_clip()` + `capture_ok`/`last_clip_age_s`, one WhatsApp per stall episode. Proven by smoke §3b/§3c (windows go to zero; alert queued once).
+- [x] **[DX] `v2_conformance_test.py` and `pipeline_soak_test.py` crashed on `main.upload_status`** DONE (2026-10-24, F-30) — renamed 2026-09-23, never re-run. Fixed, plus `Makefile` (`make venv`, `make test`) so the three tools run together. Lesson: a test nothing runs is documentation that lies.
+- [x] **[SW] Second detector could fail on every clip without escalating** DONE (2026-10-24, F-31) — one shared failure counter, reset by `psd_tonal`'s success each clip. Now per detector; `detector_ok` false when zero detectors loaded (contract).
+- [x] **[SW] Upload backlog was a number nobody watched** DONE (2026-10-24, F-32) — `note_upload_backlog()` degrades and alerts after 3 heartbeats with a non-empty spool; unreadable spool files counted as dropped instead of deleted silently.
+- [x] **[SW] Housekeeping could exceed `WatchdogSec` during recovery** DONE (2026-10-24, F-33) — time budgets + `watchdog.tick()` between items on all three drains; WhatsApp attempt persisted before each send; IoT Hub off by default, connect in a thread with timeout, after capture starts; classify-thread alerts queued for housekeeping.
+- [x] **[Config] Push-only units got no remote config; malformed config crash-looped** DONE (2026-10-24, F-34) — `push.fetch_config()` polls `GET /api/devices/config`; the poll is under `except Exception` → `health.set_config_error`.
+- [x] **[Net] 401 latch was permanent** DONE (2026-10-24, F-35) — lifts once per `AUTH_RETRY_S` (3600 s) for a probe.
+- [x] **[Config] Bench mode declared, not inferred** DONE (2026-10-24, F-36, D-019) — `OCEANKIND_BENCH=1`; `ALLOW_NO_TWILIO` + backend refuses to start without it.
 - [x] **[Config] `ALERT_THRESHOLD` is dead weight after F-09** DONE (2026-08-12) — repurposed instead of removed: it is now the real threshold of the working `rms` mode (F-01 fix), env-configurable as `OCEANKIND_ALERT_THRESHOLD`, and published truthfully in `detection.thresholds.rms_threshold`. Contract updated.
 - [x] **[DX] No tests of any kind** DONE (2026-08-12) — minimal ask satisfied by `tools/phase1_smoke_test.py`; superseded by the regression-check item above.
 - [x] **[SW] Manifest cap silently discards history** DONE (2026-08-13) — dissolved by D-016: the manifest is retired. Events are append-only immutable blobs; nothing truncates. Retention policy remains an open client question (contract §Open questions).

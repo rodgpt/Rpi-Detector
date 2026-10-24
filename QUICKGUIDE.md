@@ -44,8 +44,7 @@ git clone https://github.com/rodgpt/Rpi-Detector.git ~/Rpi-Detector
 sudo bash ~/Rpi-Detector/raspberry-pi/scripts/setup.sh
 ```
 
-Installs packages, a Python venv at `~/oceankind/venv`, the systemd service, and a template `/etc/oceankind.env`. Takes 10–15 min on a Pi 4 and 30–60 min on a Zero W. If pip starts **"Building wheel for numpy/scipy"**, Ctrl-C and ask for help: the prebuilt wheel lookup failed.
-
+Installs packages, a Python venv at `~/oceankind/venv`, the systemd service, and a template `/etc/oceankind.env`. Takes 10–15 min on a Pi 4 and 30–60 min on a Zero W.
 ## 5. Configure `/etc/oceankind.env`
 
 ```bash
@@ -64,16 +63,21 @@ OCEANKIND_SENSOR_LOCATION=name
 OCEANKIND_SENSOR_LAT=
 OCEANKIND_SENSOR_LON=
 
-# ── Secrets — leave SID/TOKEN blank unless you have your own Twilio credentials, in that case, comment line 68.
+# ── Secrets — nothing to do here on this path. The two lines are already set:
+# the unit runs without Twilio and declares it (D-019); the dashboard shows
+# "banco, sin Twilio", informational, not an error. When you have Twilio
+# credentials, fill in SID/TOKEN and delete BOTH lines together.
 OCEANKIND_ALLOW_NO_TWILIO=1
+OCEANKIND_BENCH=1
 OCEANKIND_TWILIO_SID=
 OCEANKIND_TWILIO_TOKEN=
-
 
 # ── Dashboard backend ──
 OCEANKIND_BACKEND_URL=https://marfutura.buenalynch.com   # base URL only, no /api/...
 OCEANKIND_DEVICE_KEY=<key from step 2>
 ```
+
+**Remote tuning.** Further down, under `── Detection ──`, `OCEANKIND_CONFIG_HMAC_KEY` is commented out. Without it the unit rejects every remote configuration document (by design, F-10) and only its env-file thresholds apply. To tune thresholds from the dashboard, uncomment it and paste the same key the backend holds (`OCEANKIND_CONFIG_HMAC_KEY` in the backend's `.env`). Push-only units fetch the signed document from `GET /api/devices/config` every 5 minutes.
 
 **No hydrophone yet?** Further down the file, under `── Audio ──`, two lines are already there, commented out. Uncomment both to test the whole chain with a realistic synthetic detection every ~12 min:
 
@@ -112,7 +116,7 @@ journalctl -u oceankind -n 30 | grep -i push
 ## 7. Confirm on the dashboard
 
 - **Admin → Dispositivos:** the unit has a fresh **last_seen**.
-- **Estado del sensor** tab for its site: health, not just liveness — `duty_cycle_pct` ≥ 99, `capture_overflows` ~0, `events_dropped` 0, no `degraded_reason`.
+- **Estado del sensor** tab for its site: health, not just liveness — `capture_ok` true, `duty_cycle_pct` ≥ 99, `last_clip_age_s` under 10, `capture_overflows` ~0, `events_dropped` 0, no `degraded_reason`. `alerts_enabled: false` with the "banco, sin Twilio" badge is expected on this path.
 - The test event appears under its site, under **Detecciones**.
 - Clip playback returns 404 when audio storage isn't configured. That is expected, not a fault.
 
@@ -124,6 +128,8 @@ journalctl -u oceankind -n 30 | grep -i push
 |---|---|
 | `<hostname>.local` not found | Wait a minute or use the IP from the router. Zero W: 2.4 GHz only |
 | Service won't start | `journalctl -u oceankind -n 20` names the missing/invalid variable |
+| Won't start, journal says `ALLOW_NO_TWILIO=1 con OCEANKIND_BACKEND_URL` | Unit provisioned before 2026-10-24 and updated without re-running `setup.sh`. Re-run it (adds `OCEANKIND_BENCH=1` automatically) or add that line to `/etc/oceankind.env` (D-019) |
+| `degraded_reason` says `captura detenida` | No audio window for 60 s: card unplugged, mixer muted (F-28), or stream died. `arecord -l`, `amixer -c 0 contents`, then restart |
 | No `last_seen` on the dashboard | Check `OCEANKIND_BACKEND_URL`/`OCEANKIND_DEVICE_KEY` are set and the device isn't `401`/`403` (rows below) |
 | Push log: `401` | ID/key don't match an active device. Re-check the key or recreate the device |
 | Push log: `403` | Read the logged response body. JSON `site mismatch` = the site differs from the registered one; `error code: 1010` = blocked upstream, report it |

@@ -117,8 +117,13 @@ check("cero eventos perdidos", h["events_dropped"] == 0, f"({h['events_dropped']
 check("duty cycle publicado", h["duty_cycle_pct"] is not None, f"({h['duty_cycle_pct']}%)")
 check("archivo muestreó ≥1 clip", h["archive_queue"] >= 1, f"({h['archive_queue']})")
 
+check("captura viva (sin stall) y sin degradación", h["capture_ok"] is True and h["degraded_reason"] is None,
+      f"({h['degraded_reason']})")
+
 print("4. árbol completo y conforme")
-main.upload_status(datetime.now(timezone.utc) - timedelta(hours=1), len(notified), pipe.last_rms)
+status, _sensors = main.collect_status(datetime.now(timezone.utc) - timedelta(hours=1),
+                                       len(notified), pipe.last_rms)
+main.write_status_blob(status, len(notified), pipe.last_rms)
 Path(C.DATA_LOG_PATH).unlink(missing_ok=True)
 now = datetime.now(timezone.utc)
 with Path(C.DATA_LOG_PATH).open("w", newline="") as f:

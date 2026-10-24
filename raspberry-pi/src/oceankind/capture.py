@@ -1,9 +1,14 @@
 """Captura continua: el hidrófono nunca deja de escuchar (R-1.1).
 
-Un stream de sounddevice (PortAudio) empuja bloques de ~0.1 s a una cola
-acotada desde su callback. El callback NO toca red, disco, locks lentos ni CPU
-pesada — copia el bloque, lo encola, cuenta lo que pierde. Todo lo demás pasa
-en otros hilos.
+Lectura BLOQUEANTE en un hilo propio, no callback de PortAudio (cambiado
+2026-10-24, F-29): en Codec Zero, `PortAudio`/`sounddevice` en modo callback
+falla al crear su hilo interno (`PaUnixThread_New ... Wait timed out
+[PaErrorCode -9987]`) — reproducido con parámetros por defecto, sin relación
+con sample rate, kernel, ni mixer (todos esos ya descartados; ALSA en sí
+funciona, probado con `arecord` y con `stream.read()` bloqueante). El hilo
+propio aquí hace lo mismo que hacía el callback — copiar, encolar, contar,
+nada más (R-1.1) — solo que lo hace llamando a `.read()` en un bucle en vez
+de que PortAudio lo invoque.
 
 Portado de legacy/modular-prototype/audio_capture.py (D-006), con la detección
 del dispositivo POR NOMBRE (F-15): un índice ALSA cambia con la re-enumeración
@@ -33,6 +38,8 @@ class AudioCapture:
         self._queue = block_queue
         self._stream = None
         self._dropped = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
     @staticmethod
     def list_devices() -> str:
@@ -69,25 +76,42 @@ class AudioCapture:
             samplerate=C.SAMPLE_RATE,
             blocksize=C.BLOCK_FRAMES,
             dtype="int16",
-            callback=self._callback,
             latency="low",
         )
         self._stream.start()
+        self._thread = threading.Thread(target=self._read_loop, name="audio-capture", daemon=True)
+        self._thread.start()
         health.mark_capture_started()
         log.info("Captura continua iniciada | device=%s | %d Hz | %d ch | bloques de %d frames",
                  "default" if device_idx is None else device_idx,
                  C.SAMPLE_RATE, C.CHANNELS, C.BLOCK_FRAMES)
 
     def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
         if self._stream:
             self._stream.stop()
             self._stream.close()
             self._stream = None
         log.info("Captura detenida (bloques perdidos: %d)", self._dropped)
 
-    def _callback(self, indata, frames, time_info, status) -> None:
-        # En el callback: copiar, encolar, contar. Nada más. (R-1.1)
-        if status and status.input_overflow:
+    def _read_loop(self) -> None:
+        # Mismo trabajo que antes hacía el callback de PortAudio — copiar,
+        # encolar, contar, nada más (R-1.1) — solo que acá lo maneja un hilo
+        # propio llamando a .read() en vez de que PortAudio lo invoque.
+        while not self._stop.is_set():
+            try:
+                indata, overflowed = self._stream.read(C.BLOCK_FRAMES)
+            except Exception as exc:                                   # noqa: BLE001
+                if not self._stop.is_set():
+                    log.error("Error leyendo del stream de audio: %s", exc)
+                break
+            self._handle_block(indata, overflowed)
+
+    def _handle_block(self, indata, overflowed) -> None:
+        if overflowed:
             health.count_capture_overflow()
         try:
             self._queue.put_nowait(indata.copy())
