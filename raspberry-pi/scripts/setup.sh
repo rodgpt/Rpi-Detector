@@ -182,22 +182,16 @@ OCEANKIND_TWILIO_TOKEN=
 OCEANKIND_BACKEND_URL=
 OCEANKIND_DEVICE_KEY=
 
-# ── Azure (optional; without them the unit runs local-only) ──
-# Use the NEW v2 storage account/container, not the prototypes' blob (D-016).
-OCEANKIND_STORAGE_CONNECTION_STRING=
-OCEANKIND_STORAGE_CONTAINER=alerts
-OCEANKIND_IOTHUB_CONNECTION_STRING=
-
-# ── Notification routing ─────────────────────────────────
-OCEANKIND_TWILIO_FROM=
-OCEANKIND_TWILIO_TO=
-# OCEANKIND_TO_ALERTA=
-# OCEANKIND_TO_TECNICO=
-# OCEANKIND_CALL_TO=
-
 # ── Audio (continuous capture; device matched BY NAME, never by index) ──
-# OCEANKIND_AUDIO_DEVICE_NAME=codec,sndrpicodeczero,hifiberry,sndrpihifiberry,dacplusadc
-# OCEANKIND_AUDIO_SOURCE=device       # or synthetic:tone for a bench without hydrophone
+# Codec Zero is the project's ADC (D-009); real card name confirmed on
+# hardware 2026-10-21 is "IQaudIOCODEC". Uncommented so it's explicit rather
+# than relying silently on config.py's matching default.
+OCEANKIND_AUDIO_DEVICE_NAME=codec,iqaudiocodec,hifiberry,sndrpihifiberry,dacplusadc
+# No hydrophone yet? Uncomment these two lines to test the whole chain with a
+# realistic synthetic detection every ~12 min on average. Leave both
+# commented out for a real deployment.
+# OCEANKIND_AUDIO_SOURCE=synthetic:sporadic
+# OCEANKIND_SYNTHETIC_SPORADIC_MEAN_S=720
 
 # ── Detection (defaults are sane; remotely tunable via remote_config.json) ──
 # OCEANKIND_DETECTION_MODE=psd        # psd | rms | auto
@@ -207,6 +201,19 @@ OCEANKIND_TWILIO_TO=
 # OCEANKIND_CONFIG_HMAC_KEY=          # REQUIRED for remote config: without it the
                                       # device refuses all remote tuning (F-10).
                                       # Same key lives in the backend secret store.
+
+# ── Notification routing ─────────────────────────────────
+OCEANKIND_TWILIO_FROM=
+OCEANKIND_TWILIO_TO=
+# OCEANKIND_TO_ALERTA=
+# OCEANKIND_TO_TECNICO=
+# OCEANKIND_CALL_TO=
+
+# ── Azure (optional; without them the unit runs local-only) ──
+# Use the NEW v2 storage account/container, not the prototypes' blob (D-016).
+OCEANKIND_STORAGE_CONNECTION_STRING=
+OCEANKIND_STORAGE_CONTAINER=alerts
+OCEANKIND_IOTHUB_CONNECTION_STRING=
 ENV_EOF
     chmod 600 /etc/oceankind.env
     echo "Environment template written to /etc/oceankind.env — FILL IT IN before starting."

@@ -2,7 +2,7 @@
 
 Blank Raspberry Pi → measuring and reporting to the dashboard. About 1 hour, mostly waiting on the install.
 
-**You need:** a Pi (Zero 2 W / 3 / 4), power supply, 16 GB+ SD card, Wi-Fi or Ethernet with internet (Pi Zero: **2.4 GHz only**), an admin login to the dashboard, and the hydrophone/ADC board attached (skip for a test unit — see step 5).
+**You need:** a Pi (Zero 2 W / 3 / 4), power supply, 16 GB+ SD card, Wi-Fi or Ethernet with internet (Pi Zero: **2.4 GHz only**), an admin login to the dashboard, and a Raspberry Pi Codec Zero HAT with the hydrophone circuit wired to it (skip both for a test unit — see step 5). Codec Zero is confirmed working end-to-end as of 2026-10-21 (D-009) — no extra config, it's detected automatically in step 6.
 
 ---
 
@@ -31,22 +31,12 @@ Log in as admin at **https://marfutura.buenalynch.com**.
 
 ## 3. Get the code onto the Pi
 
-SSH in (`ssh marfutura@<hostname>.local`, or use the IP from your router), then either:
-
-**Clone** (Pi has internet):
+SSH in (`ssh marfutura@<hostname>.local`, or use the IP from your router):
 
 ```bash
+sudo apt-get update && sudo apt-get install -y git   # NOT installed by default on Lite
 git clone https://github.com/rodgpt/Rpi-Detector.git ~/Rpi-Detector
 ```
-
-**or rsync** from your computer (repo root):
-
-```bash
-rsync -av --exclude .git --exclude legacy --exclude '__pycache__' \
-    ./ marfutura@<hostname>.local:~/Rpi-Detector/
-```
-
-> If you rsync from the maintainers' checkout, `raspberry-pi/oceankind.env` comes with it and contains **live production Twilio credentials and recipients**. Delete it first (`rm raspberry-pi/oceankind.env`) so the installer writes a blank template instead. A fresh `git clone` doesn't include it.
 
 ## 4. Provision
 
@@ -62,37 +52,37 @@ Installs packages, a Python venv at `~/oceankind/venv`, the systemd service, and
 sudo nano /etc/oceankind.env
 ```
 
-Set (leave everything else alone):
+The fields below are listed **in the same top-to-bottom order they appear in the real file** `setup.sh` generates, so you can go through it once, start to finish, instead of hunting for each line:
 
 ```bash
-# Identity — must match what you created in step 2
-OCEANKIND_DEVICE_ID=Rpi_zapallar
-OCEANKIND_SITE=zapallar
-OCEANKIND_SENSOR_LOCATION=Zapallar
-OCEANKIND_SENSOR_LAT=-32.55
-OCEANKIND_SENSOR_LON=-71.46
+# ── Identity — must match what you created in step 2 ──
+OCEANKIND_DEVICE_ID=name
+OCEANKIND_SITE=name
+OCEANKIND_SENSOR_LOCATION=name
+# LAT/LON: leave blank. Only used when Azure storage is configured, which
+# this guide doesn't set up — they do nothing for this flow.
+OCEANKIND_SENSOR_LAT=
+OCEANKIND_SENSOR_LON=
 
-# Dashboard
-OCEANKIND_BACKEND_URL=https://marfutura.buenalynch.com   # base URL only, no /api/...
-OCEANKIND_DEVICE_KEY=<key from step 2>
-
-# Where the local record goes (required — without it nothing is written)
-OCEANKIND_OUTPUT_DIR=/home/marfutura/oceankind/out
-
-# WhatsApp/calls: leave off unless you have your own Twilio credentials
+# ── Secrets — leave SID/TOKEN blank unless you have your own Twilio credentials, in that case, comment line 68.
 OCEANKIND_ALLOW_NO_TWILIO=1
 OCEANKIND_TWILIO_SID=
 OCEANKIND_TWILIO_TOKEN=
+
+
+# ── Dashboard backend ──
+OCEANKIND_BACKEND_URL=https://marfutura.buenalynch.com   # base URL only, no /api/...
+OCEANKIND_DEVICE_KEY=<key from step 2>
 ```
 
-**No hydrophone yet?** Add a synthetic source so you can test the whole chain:
+**No hydrophone yet?** Further down the file, under `── Audio ──`, two lines are already there, commented out. Uncomment both to test the whole chain with a realistic synthetic detection every ~12 min:
 
 ```bash
-OCEANKIND_AUDIO_SOURCE=synthetic:sporadic          # realistic: a detection every ~12 min on average
+OCEANKIND_AUDIO_SOURCE=synthetic:sporadic
 OCEANKIND_SYNTHETIC_SPORADIC_MEAN_S=720
 ```
 
-For a real unit, leave `OCEANKIND_AUDIO_SOURCE` unset (default `device`; the sound card is found by name, no index needed). **Remove any `synthetic:*` line before deployment.**
+Leave them commented out for a real deployment.
 
 The file is root-only (mode 600). Any edit needs `sudo`.
 
@@ -103,7 +93,7 @@ sudo systemctl restart oceankind
 journalctl -u oceankind -f          # Ctrl-C to leave
 ```
 
-Look for `Captura continua iniciada`, then `status.json` after ~60 s. A missing variable makes the service **refuse to start** and print which one: fix the env and restart.
+Look for `Captura continua iniciada`. A missing variable makes the service **refuse to start** and print which one: fix the env and restart. **A successful heartbeat prints nothing** — silence after ~60 s is the good outcome, not a sign of nothing happening; a failed one logs `heartbeat: ...` once. The dashboard check below is what actually confirms it.
 
 Check the dashboard connection:
 
@@ -122,16 +112,9 @@ journalctl -u oceankind -n 30 | grep -i push
 ## 7. Confirm on the dashboard
 
 - **Admin → Dispositivos:** the unit has a fresh **last_seen**.
-- The test event appears under its site.
+- **Estado del sensor** tab for its site: health, not just liveness — `duty_cycle_pct` ≥ 99, `capture_overflows` ~0, `events_dropped` 0, no `degraded_reason`.
+- The test event appears under its site, under **Detecciones**.
 - Clip playback returns 404 when audio storage isn't configured. That is expected, not a fault.
-
-On the Pi, health lives in `status.json`:
-
-```bash
-python3 -m json.tool ~/oceankind/out/sites/<site>/status.json | grep -A14 '"health"'
-```
-
-Healthy = `duty_cycle_pct` ≥ 99, `capture_overflows` ~0, `events_dropped` 0, no `degraded_reason`.
 
 ---
 
@@ -141,7 +124,7 @@ Healthy = `duty_cycle_pct` ≥ 99, `capture_overflows` ~0, `events_dropped` 0, n
 |---|---|
 | `<hostname>.local` not found | Wait a minute or use the IP from the router. Zero W: 2.4 GHz only |
 | Service won't start | `journalctl -u oceankind -n 20` names the missing/invalid variable |
-| Nothing written | `OCEANKIND_OUTPUT_DIR` not set |
+| No `last_seen` on the dashboard | Check `OCEANKIND_BACKEND_URL`/`OCEANKIND_DEVICE_KEY` are set and the device isn't `401`/`403` (rows below) |
 | Push log: `401` | ID/key don't match an active device. Re-check the key or recreate the device |
 | Push log: `403` | Read the logged response body. JSON `site mismatch` = the site differs from the registered one; `error code: 1010` = blocked upstream, report it |
 | `backend inalcanzable` | No internet or backend down. Events spool locally (max 500) and retry |
@@ -149,6 +132,6 @@ Healthy = `duty_cycle_pct` ≥ 99, `capture_overflows` ~0, `events_dropped` 0, n
 | Different USB/ALSA hardware | Set `OCEANKIND_AUDIO_DEVICE_NAME` to a substring of the card name (`arecord -l`) |
 
 **After any env change:** `sudo systemctl restart oceankind`.
-**After a code update:** re-rsync/`git pull`, then re-run `setup.sh`. It won't overwrite `/etc/oceankind.env`.
+**After a code update:** `git pull` in `~/Rpi-Detector`, then re-run `setup.sh`. It won't overwrite `/etc/oceankind.env`.
 
 Deeper detail (soak testing, event-rate tuning, Cloudflare quirks): `raspberry-pi/docs/BENCH.md`.

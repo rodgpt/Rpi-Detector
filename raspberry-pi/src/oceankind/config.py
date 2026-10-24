@@ -131,10 +131,14 @@ CAPTURE_SECONDS = 5.0
 BLOCK_FRAMES    = int(os.environ.get("OCEANKIND_BLOCK_FRAMES", "4800"))   # 0.1 s por bloque
 # Detección del dispositivo POR NOMBRE (F-15): substring, case-insensitive.
 # Un índice ALSA cambia con la re-enumeración USB; un nombre no.
-# Codec Zero es el HAT confirmado para el proyecto (D-009, 2026-10-01); los
-# hints de HifiBerry quedan por compatibilidad con cualquier unidad que lo use.
+# Codec Zero es el HAT confirmado para el proyecto (D-009, 2026-10-01). Nombre
+# de tarjeta ALSA verificado en hardware real 2026-10-21: "IQaudIOCODEC" (el
+# driver hereda el nombre del diseño original de IQaudio, no "sndrpicodeczero"
+# como se asumió antes de probarlo). "codec" ya matcheaba por substring; se
+# agrega el nombre real además. Los hints de HifiBerry quedan por compatibilidad
+# con cualquier unidad que lo use.
 AUDIO_DEVICE_NAME = os.environ.get("OCEANKIND_AUDIO_DEVICE_NAME",
-                                   "codec,sndrpicodeczero,hifiberry,sndrpihifiberry,dacplusadc")
+                                   "codec,iqaudiocodec,hifiberry,sndrpihifiberry,dacplusadc")
 # Fuente de audio: "device" (hardware) o "synthetic:<patrón>" para banco sin
 # hidrófono (R-9.4).
 AUDIO_SOURCE = os.environ.get("OCEANKIND_AUDIO_SOURCE", "device").strip().lower()
