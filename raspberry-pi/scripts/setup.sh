@@ -128,6 +128,18 @@ Wants=network-online.target
 Type=simple
 User=${SERVICE_USER}
 WorkingDirectory=${OCEANKIND_DIR}
+# Codec Zero (D-009) boots with AUX IN capture fully muted — Aux/Mixin/ADC
+# switches all default off. Nothing in ALSA or our code enables this on its
+# own; found 2026-10-24 (F-28) when capture failed with "Input/output error"
+# / "I2S SYNC error!" that looked kernel-related but wasn't. Not "-" guarded:
+# a missing control means this is no longer the hardware D-009 committed to,
+# and that should fail loud, not run with audio silently muted.
+ExecStartPre=/usr/bin/amixer -c 0 cset name='AUX Jack Switch' on
+ExecStartPre=/usr/bin/amixer -c 0 cset name='Aux Switch' on,on
+ExecStartPre=/usr/bin/amixer -c 0 cset name='Mixin Left Aux Left Switch' on
+ExecStartPre=/usr/bin/amixer -c 0 cset name='Mixin Right Aux Right Switch' on
+ExecStartPre=/usr/bin/amixer -c 0 cset name='Mixin PGA Switch' on,on
+ExecStartPre=/usr/bin/amixer -c 0 cset name='ADC Switch' on,on
 ExecStart=${VENV_PY} ${OCEANKIND_DIR}/marfutura_iot_audio.py
 Restart=always
 RestartSec=15
@@ -170,10 +182,7 @@ OCEANKIND_SENSOR_LAT=
 OCEANKIND_SENSOR_LON=
 
 # ── Secrets (REQUIRED — service will not start without them) ──
-# ALLOW_NO_TWILIO=1 is active by default: a freshly provisioned unit has no
-# Twilio credentials yet. Comment it out once real OCEANKIND_TWILIO_SID/TOKEN
-# are filled in below — then it's a no-op either way (config.py only checks
-# it when credentials are absent), but commenting it out says what's true.
+# Comment the line below out once real TWILIO_SID/TOKEN are filled in.
 OCEANKIND_ALLOW_NO_TWILIO=1
 OCEANKIND_TWILIO_SID=
 OCEANKIND_TWILIO_TOKEN=
@@ -185,10 +194,12 @@ OCEANKIND_BACKEND_URL=
 OCEANKIND_DEVICE_KEY=
 
 # ── Audio (continuous capture; device matched BY NAME, never by index) ──
-# Codec Zero is the project's ADC (D-009); real card name confirmed on
-# hardware 2026-10-21 is "IQaudIOCODEC". Uncommented so it's explicit rather
-# than relying silently on config.py's matching default.
-OCEANKIND_AUDIO_DEVICE_NAME=codec,iqaudiocodec,hifiberry,sndrpihifiberry,dacplusadc
+# Codec Zero is the project's ADC (D-009). Its exact ALSA card name isn't
+# stable across kernel/driver versions (seen as "IQaudIOCODEC" and later
+# "Zero [RPi Codec Zero]" on the same hardware) — "codec" is the one
+# substring common to both. Uncommented so it's explicit, not an invisible
+# default.
+OCEANKIND_AUDIO_DEVICE_NAME=codec
 # No hydrophone yet? Uncomment these two lines to test the whole chain with a
 # realistic synthetic detection every ~12 min on average. Leave both
 # commented out for a real deployment.

@@ -2,7 +2,7 @@
 
 Blank Raspberry Pi → measuring and reporting to the dashboard. About 1 hour, mostly waiting on the install.
 
-**You need:** a Pi (Zero 2 W / 3 / 4), power supply, 16 GB+ SD card, Wi-Fi or Ethernet with internet (Pi Zero: **2.4 GHz only**), an admin login to the dashboard, and a Raspberry Pi Codec Zero HAT with the hydrophone circuit wired to it (skip both for a test unit — see step 5). Codec Zero is confirmed working end-to-end as of 2026-10-21 (D-009) — no extra config, it's detected automatically in step 6.
+**You need:** a Pi (Zero 2 W / 3 / 4), power supply, 16 GB+ SD card, Wi-Fi or Ethernet with internet (Pi Zero: **2.4 GHz only**), an admin login to the dashboard, and a Raspberry Pi Codec Zero HAT with the hydrophone circuit wired to it (skip both for a test unit — see step 5). Codec Zero is detected automatically in step 6, no config needed — **but see step 1 for a kernel bug that currently breaks capture on the default OS image.**
 
 ---
 
@@ -10,7 +10,7 @@ Blank Raspberry Pi → measuring and reporting to the dashboard. About 1 hour, m
 
 In **Raspberry Pi Imager**:
 
-- **OS:** Raspberry Pi OS **Lite**. 64-bit for Pi 3/4/Zero 2 W. **32-bit** for the original Zero W (ARMv6 won't boot 64-bit).
+- **OS:** Raspberry Pi OS **(Legacy) Lite** — Debian 12 (bookworm), kernel 6.12. **Not the default "Raspberry Pi OS Lite"** (Debian 13/trixie, kernel 6.18.x): that kernel has a confirmed, currently-unfixed regression that breaks Codec Zero audio *capture* specifically (card still enumerates fine, `arecord` fails with `Input/output error` — [raspberrypi/linux#7692](https://github.com/raspberrypi/linux/issues/7692)). In Imager: **Choose OS → Raspberry Pi OS (other) → Raspberry Pi OS (Legacy, 64-bit or 32-bit) Lite**. 64-bit for Pi 3/4/Zero 2 W, 32-bit for the original Zero W (ARMv6 won't boot 64-bit).
 - **Edit settings:**
   - Hostname: e.g. `oceankind-zapallar`
   - Username: **`marfutura`** (required — the scripts assume it) + a password
@@ -130,6 +130,7 @@ journalctl -u oceankind -n 30 | grep -i push
 | `backend inalcanzable` | No internet or backend down. Events spool locally (max 500) and retry |
 | No detections | Still on `device` source with no hydrophone. Set a synthetic source (step 5) |
 | Different USB/ALSA hardware | Set `OCEANKIND_AUDIO_DEVICE_NAME` to a substring of the card name (`arecord -l`) |
+| `arecord` fails with `Input/output error`, card shows fine in `arecord -l` | Check `uname -r` — `6.18.39`/`6.18.50` means the trixie kernel bug (step 1). Re-flash with Raspberry Pi OS (Legacy) Lite |
 
 **After any env change:** `sudo systemctl restart oceankind`.
 **After a code update:** `git pull` in `~/Rpi-Detector`, then re-run `setup.sh`. It won't overwrite `/etc/oceankind.env`.

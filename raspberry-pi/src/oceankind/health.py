@@ -242,8 +242,10 @@ def build_health() -> dict:
     if not audio_ok:
         reasons.append(f"sin señal de audio (pico RMS {peak_rms:.4f} bajo el piso "
                        f"{C.AUDIO_FLOOR_RMS}) — revisar hidrófono/cable")
-    if not C.TWILIO_CONFIGURED:
-        reasons.append("sin credenciales Twilio — ninguna alerta WhatsApp puede salir (modo banco)")
+    # Not a degradation: a bench unit with OCEANKIND_ALLOW_NO_TWILIO=1 is working
+    # exactly as configured. Surfaced as its own boolean rather than folded into
+    # `reasons`, so it never flips a healthy unit into "degraded" (dashboard
+    # HealthBadge.readHealth / DATA-CONTRACT.md health.alerts_enabled).
     if push.auth_failed():
         reasons.append("credencial del backend rechazada (401) — push de eventos detenido; "
                        "el blob sigue escribiéndose")
@@ -283,6 +285,7 @@ def build_health() -> dict:
         "heartbeat_fail_streak": hb_fail_streak,
         "wa_pending":         notify.pending_alert_count(),
         "archive_queue":      _archive_queue_len(),
+        "alerts_enabled":     C.TWILIO_CONFIGURED,
         "degraded_reason":    "; ".join(reasons) if reasons else None,
     }
 

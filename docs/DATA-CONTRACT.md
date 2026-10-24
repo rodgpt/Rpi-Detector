@@ -234,6 +234,9 @@ This section is the shape of the document. **Device heartbeat**, below, is how i
     "duty_cycle_pct": 99.4,         // F-05. measured, not asserted
     "clips_dropped":  0,            // bounded-queue drops
     "upload_backlog": 0,            // events awaiting upload
+    "alerts_enabled": true,         // false in bench mode (OCEANKIND_ALLOW_NO_TWILIO=1). Not a
+                                     // degradation — a unit can be fully operational with this
+                                     // false, so it must never appear in `degraded_reason`
     "degraded_reason": null         // human-readable when anything above is false
   },
 
