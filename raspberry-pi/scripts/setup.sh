@@ -170,11 +170,13 @@ OCEANKIND_SENSOR_LAT=
 OCEANKIND_SENSOR_LON=
 
 # ── Secrets (REQUIRED — service will not start without them) ──
+# ALLOW_NO_TWILIO=1 is active by default: a freshly provisioned unit has no
+# Twilio credentials yet. Comment it out once real OCEANKIND_TWILIO_SID/TOKEN
+# are filled in below — then it's a no-op either way (config.py only checks
+# it when credentials are absent), but commenting it out says what's true.
+OCEANKIND_ALLOW_NO_TWILIO=1
 OCEANKIND_TWILIO_SID=
 OCEANKIND_TWILIO_TOKEN=
-# Bench units without Twilio only: uncomment to allow starting without
-# credentials. The unit then CANNOT send any alert and says so in health.
-# OCEANKIND_ALLOW_NO_TWILIO=1
 
 # ── Dashboard backend: direct event push, in addition to the blob ──
 # Per-device key issued at registration; empty URL = push disabled (index
