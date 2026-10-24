@@ -19,7 +19,9 @@ Three unit states matter, and they behave differently: **bench** (root writable)
 
 ## 2. What the workstation harness proves
 
-`bash raspberry-pi/tools/ota_fault_test.sh` drives the real, unmodified `update_oceankind.sh` with every state-changing command (`git cp rm mv touch sleep systemctl raspi-config reboot pip tee`) wrapped so it can `SIGKILL` the script just before or just after call *k* — and `cp` can be cut **mid-copy**, leaving a torn install. It enumerates **every** cut point of a clean run, restores power (reboot: volatile state lost, RAM overlay reverted, boot hooks run), lets three nightly cron runs happen, and asserts:
+`bash raspberry-pi/tools/ota_fault_test.sh` drives the real, unmodified `update_oceankind.sh` with every state-changing command (`git cp rm mv touch sleep systemctl raspi-config reboot pip tee curl`) wrapped so it can `SIGKILL` the script just before or just after call *k* — and `cp` can be cut **mid-copy**, leaving a torn install. It enumerates **every** cut point of a clean run, restores power (reboot: volatile state lost, RAM overlay reverted, boot hooks run), lets three timer runs happen, and asserts:
+
+**Since D-021 (2026-10-24) the target is an assigned release, not `origin/main`.** Each golden unit carries the tag the panel "assigned"; the harness never writes `.assigned_release` (an overlay unit loses it across the maintenance reboot, which is exactly the case to model), so every run resolves the assignment the way the daily timer does in the field — by asking the backend. `curl` is stubbed to answer `GET /api/devices/config` with that tag, and to fail while the network is down, like `git`. "Nightly cron" below now means `oceankind-ota.timer`.
 
 | Invariant | Meaning |
 |---|---|

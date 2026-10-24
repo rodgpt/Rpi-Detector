@@ -13,7 +13,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config as C
-from . import notify
 from . import storage
 
 log = logging.getLogger("oceankind")
@@ -158,90 +157,10 @@ def fetch_modem_signal() -> dict:
     return out
 
 
-# ─── Alerta de batería (debounce + histéresis, preservado de v1) ─────────────
-
-_BATTERY_LEVEL_ORDER = {"warning": 1, "critical": 2, "emergency": 3}
-
-
-def _load_battery_state() -> dict:
-    import json  # noqa: PLC0415
-    try:
-        s = json.loads(C.BATTERY_STATE_FILE.read_text())
-        if "alerted" not in s:
-            s = {"alerted": s.get("level"), "pending": None, "pending_count": 0}
-        return s
-    except Exception:
-        return {"alerted": None, "pending": None, "pending_count": 0}
-
-
-def _save_battery_state(state: dict) -> None:
-    import json  # noqa: PLC0415
-    try:
-        C.BATTERY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        C.BATTERY_STATE_FILE.write_text(json.dumps(state))
-    except Exception as exc:
-        log.debug("no se pudo persistir battery state: %s", exc)
-
-
-def check_battery_alert(solar: dict) -> None:
-    """Alerta si la batería cruza un umbral de manera SOSTENIDA (debounce), con
-    histéresis para no re-alertar el mismo nivel. No-op sin Victron."""
-    v = solar.get("battery_voltage_v")
-    if v is None:
-        return
-    state = _load_battery_state()
-    alerted = state.get("alerted")
-    if v >= C.BATTERY_RECOVERY_V:
-        current = "recovered"
-    elif v <= C.BATTERY_EMERGENCY_V:
-        current = "emergency"
-    elif v <= C.BATTERY_CRITICAL_V:
-        current = "critical"
-    elif v <= C.BATTERY_WARNING_V:
-        current = "warning"
-    else:
-        _save_battery_state({"alerted": alerted, "pending": None, "pending_count": 0})
-        return
-    pending_count = state.get("pending_count", 0) + 1 if state.get("pending") == current else 1
-    state = {"alerted": alerted, "pending": current, "pending_count": pending_count}
-    if pending_count < C.BATTERY_DEBOUNCE_CYCLES:
-        log.info("  batería %s (%.2fV) ciclo %d/%d — esperando confirmación",
-                 current, v, pending_count, C.BATTERY_DEBOUNCE_CYCLES)
-        _save_battery_state(state)
-        return
-    if current == "recovered":
-        if alerted is not None:
-            log.info("🔋 batería recuperada (V=%.2f) — sin WhatsApp (no hay plantilla)", v)
-        _save_battery_state({"alerted": None, "pending": None, "pending_count": 0})
-        return
-    if _BATTERY_LEVEL_ORDER[current] <= _BATTERY_LEVEL_ORDER.get(alerted, 0):
-        _save_battery_state(state)
-        return
-    _send_battery_warning(v, current, solar)
-    _save_battery_state({"alerted": current, "pending": current, "pending_count": pending_count})
-
-
-def _send_battery_warning(voltage: float, level: str, solar: dict) -> None:
-    if not C.TWILIO_CONFIGURED or not C.TWILIO_TO or "XXXXXXXXX" in C.TWILIO_TO:
-        log.error("BATERÍA %s (%.2fV) — sin WhatsApp configurado", level, voltage)
-        return
-    panel_w = solar.get("panel_power_w") or 0
-    load_w  = compute_system_load(solar) or 4.0
-    net_draw_w = max(0.1, load_w - panel_w)
-    remaining_pct = max(0.0, (voltage - 10.5) / (12.6 - 10.5))
-    hours_left = remaining_pct * 180 / net_draw_w
-    eta_str = f"{hours_left:.1f} h" if hours_left < 24 else f"{hours_left/24:.1f} días"
-    label = {"warning": "BAJA", "critical": "CRITICA", "emergency": "EMERGENCIA"}.get(level, level)
-    action = (f"La estación se apagará en minutos si no llega sol (autonomía ~{eta_str})."
-              if level == "emergency"
-              else f"Revisar paneles y orientación; considerar carga manual (autonomía ~{eta_str}).")
-    try:
-        notify._wa_send(C.WA_TPL_BATTERY, notify._wa_vars(
-            f"{voltage:.2f}", label, action, prefix_v2=False,
-        ), log_ok=f"🔋 alerta batería {level} (V={voltage:.2f}) → WhatsApp enviado",
-           recipients=C.TO_TECNICO)
-    except Exception as exc:
-        log.warning("falló envío alerta batería: %s", exc)
+# ─── Alerta de batería: la decide el BACKEND (D-020) ─────────────────────────
+# El debounce y la histéresis que vivían aquí (y perdían su estado en cada
+# reinicio, F-19) viven ahora en el backend, sobre power.battery_voltage_v de
+# los heartbeats que este módulo ya mide. Aquí no queda nada que decidir.
 
 
 # ─── CSV histórico + power_history.json ──────────────────────────────────────

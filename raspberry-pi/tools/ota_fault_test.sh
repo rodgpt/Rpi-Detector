@@ -55,6 +55,12 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${1:-$HERE/../scripts/update_oceankind.sh}"
 BASE="${TMPDIR:-/tmp}"; BASE="${BASE%/}/oceankind-ota-fault"
+# D-021: the script converges to an ASSIGNED release, never to origin/main. Each
+# golden unit carries its target tag; the harness never writes .assigned_release
+# (an overlay unit loses it across the maintenance reboot, which is the point),
+# so every run resolves the assignment the way the daily timer does in the
+# field — by asking the backend. `curl` is stubbed to answer with that tag and
+# to fail while the network is down, like git.
 ONLY="${OTA_FAULT_ONLY:-S1 S2 S3 S4 D1 D2 D3 D4 F}"
 STUBS="$BASE/stubs"
 echo "Testing: $SCRIPT"
@@ -215,6 +221,18 @@ cat > "$STUBS/findmnt" <<'EOF'
 [ "$(cat "$OTA_S/state/eff_overlay" 2>/dev/null)" = on ] && echo overlay || echo ext4
 EOF
 
+# the backend, as the script sees it: GET /api/devices/config → the assignment
+cat > "$STUBS/curl" <<'EOF'
+#!/bin/bash
+. "$OTA_BASE/fp.sh"
+fp_hit "curl"
+if [ "$(cat "$OTA_S/state/net" 2>/dev/null)" = down ]; then
+  echo "curl: (6) Could not resolve host" >&2; fp_after; exit 6
+fi
+printf '{"config":{"release":"%s","hold":false}}' "$(cat "$OTA_S/target")"
+fp_after; exit 0
+EOF
+
 cat > "$STUBS/reboot" <<'EOF'
 #!/bin/bash
 . "$OTA_BASE/fp.sh"
@@ -258,6 +276,8 @@ build_golden() {
   mkdir -p "$g/home/oceankind/venv/bin"
   git init -q --bare "$o"
   git -C "$WORK" push -q "$o" "$2:refs/heads/main"
+  git -C "$WORK" push -q "$o" --tags                       # releases are tags (D-021)
+  echo "$3" > "$g/target"                                  # what the panel assigned
   git clone -q --branch main "$o" "$h/code" 2>/dev/null
   cp "$h/code/raspberry-pi/src/"*.py "$h/"
   cp -R "$h/code/raspberry-pi/src/oceankind" "$h/oceankind"
@@ -279,6 +299,8 @@ sess_reset() {
   cp -R "$BASE/golden_$GOLD/home" "$S/home"; cp -R "$BASE/golden_$GOLD/origin.git" "$S/origin.git"
   "$REAL_git" -C "$S/home/oceankind/code" remote set-url origin "$S/origin.git"
   cp "$BASE/golden_$GOLD/poison" "$S/ctrl"
+  cp "$BASE/golden_$GOLD/target" "$S/target"
+  printf 'OCEANKIND_BACKEND_URL=http://backend.test\nOCEANKIND_DEVICE_SECRET=test-secret\nOCEANKIND_DEVICE_ID=Rpi_test\n' > "$S/state/env"
   if [ "$HAS_BOOT" = 1 ]; then
     echo "[Unit]" > "$S/unit_dir/oceankind-ota-boot.service"; : > "$S/unit_dir/.enabled_oceankind-ota-boot.service"
   fi
@@ -303,7 +325,8 @@ run_script() { # args passed to the script; FP_TAG optional
            OTA_UNIT_DIR="$S/unit_dir" OTA_PIDFILE="$S/state/script.pid" \
            OCEANKIND_OTA_SETTLE_S="${SETTLE:-1}" OCEANKIND_REPO_URL="$S/origin.git" \
            OCEANKIND_ONESHOT_FLAG="$S/var_tmp/oceankind_update_pending" \
-           OCEANKIND_UNIT_DIR="$S/unit_dir" OCEANKIND_RUN_DIR="$S/run"
+           OCEANKIND_UNIT_DIR="$S/unit_dir" OCEANKIND_RUN_DIR="$S/run" \
+           OCEANKIND_ENV_FILE="$S/state/env"
     bash -c 'echo $$ > "$OTA_PIDFILE"; exec bash "$@"' _ "$SCRIPT" "$@"
   ) >> "$OUT" 2>&1 &
   local bg=$!

@@ -8,12 +8,14 @@ The device emits it, verified end to end by `raspberry-pi/tools/v2_conformance_t
 
 Derived by walking the five dashboard tabs, listing every field each one consumes, and working backwards. Client has confirmed the blob shape is ours to define.
 
-Last updated 2026-10-24 (`health.capture_ok` / `last_clip_age_s` added; `detector_ok` semantics tightened; config delivery for push-only units via `GET /api/devices/config` — F-29, F-31, F-34). Previous: 2026-09-23 (**Device heartbeat**), 2026-08-26 (**Event upload** — dashboard D-022).
+Last updated 2026-10-24, second revision (review Batch D — Rpi-Detector D-020 and D-021): **Provisioning secret** and **Alerting** sections added; configuration is signed per device with a key derived from that secret, `OCEANKIND_CONFIG_HMAC_KEY` is gone; `release` and `hold` travel inside the signed `config`; `status.json` gains an `ota` block and loses `health.alerts_enabled` / `health.wa_pending`. Earlier the same day: `health.capture_ok` / `last_clip_age_s` added; `detector_ok` semantics tightened; config delivery for push-only units via `GET /api/devices/config` (F-29, F-31, F-34). Previous: 2026-09-23 (**Device heartbeat**), 2026-08-26 (**Event upload** — dashboard D-022).
 
 **Implementation notes, normative for consumers:**
 
 - Event blob filenames are `{YYYY-MM-DDTHH-MM-SS}_{uuid4}.json` (capture time, dashes); clips are `{uuid4}.wav`. Both under date partitions derived from `captured_utc`.
-- The `health` block carries fields beyond the schema below: `deaf_seconds_total`, `suppressed_count`, `events_dropped`, `wa_pending`, `archive_queue`, `capture_overflows` (PortAudio overflows plus block-queue drops), and since the event push: `push_enabled`, `push_backlog`, `push_rejected`, `push_dropped`. Additive, same fail-loud spirit. A consumer must tolerate more health fields than it knows.
+- The `health` block carries fields beyond the schema below: `deaf_seconds_total`, `suppressed_count`, `events_dropped`, `archive_queue`, `capture_overflows` (PortAudio overflows plus block-queue drops), and since the event push: `push_enabled`, `push_backlog`, `push_rejected`, `push_dropped`. Additive, same fail-loud spirit. A consumer must tolerate more health fields than it knows. `wa_pending` and `alerts_enabled` were removed on 2026-10-24 (D-020): the device no longer sends any alert itself, so neither has anything to describe.
+- **The device never notifies a human directly.** Every WhatsApp or voice alert leaves from the backend, driven by what this contract already carries: the event push, the heartbeat (`health.degraded_reason`, `power.battery_voltage_v`) and the absence of heartbeats. See **Alerting** below.
+- **The device holds one secret**, issued once by the admin panel; the authentication key it presents and the key it verifies configuration with are both derived from it. See **Provisioning secret** below.
 - `score` for an RMS-decided event is the normalised RMS, already 0..1. The PSD detector's score is its tonal fraction; `ml_mfcc`'s is the model probability. `detector_meta.decided_by` records the registry member that decided (`psd_tonal` | `rms` | `ml_mfcc` | `rms_fallback`). Since the Phase 3 registry (2026-08-26), one clip can yield **multiple events** — one per detector that fired, distinct `event_id`s, same `captured_utc`; the first inside the cooldown window is the notified one. `event_type: "blast"` is now producible (the restored `ml_mfcc`), and `detection.thresholds` carries `ml_score_min` (device-local until the config contract learns it — see the `detectors` proposal in `docs/TODO.md`).
 - Suppressed events carry their would-be `clip.path` with `uploaded: false`. The audio is not kept (D-008).
 - `status.json → audio.device` describes the *selection rule*, `by-name:<hints>` or `synthetic:<pattern>`, never an ALSA index. Hardcoded indexes were the F-15 defect.
@@ -251,14 +253,22 @@ This section is the shape of the document. **Device heartbeat**, below, is how i
     "push_rejected":  0,            // terminal 400/403 from the backend
     "push_dropped":   0,            // pushes lost to the push-spool cap
     "heartbeat_fail_streak": 0,     // consecutive failed heartbeat POSTs (degrades at 3)
-    "wa_pending":     0,            // WhatsApp alerts awaiting retry
     "archive_queue":  12,           // clips in the local archive sample queue
-    "alerts_enabled": true,         // false in bench mode (OCEANKIND_ALLOW_NO_TWILIO=1). Not a
-                                     // degradation — a unit can be fully operational with this
-                                     // false, so it must never appear in `degraded_reason`
-                                     // (Rpi-Detector D-019)
-    "degraded_reason": null         // human-readable when anything above is false. The device
-                                     // also sends ONE WhatsApp per degradation episode
+    "degraded_reason": null         // human-readable when anything above is false. The BACKEND
+                                     // sends one WhatsApp when this changes between heartbeats
+                                     // and one when it clears (D-020); the device sends nothing
+  },
+
+  "ota": {                          // release state (Rpi-Detector D-021). all keys always present
+    "installed_sha":     "a1b2c3d",  // short commit the OTA verified and committed; null if the
+                                     // unit was provisioned by setup.sh and never updated by OTA
+    "installed_release": "v2.2.0",   // the git ref that commit was deployed from; null as above
+    "failed_sha":        null,       // a commit that broke this unit and was rolled back; the OTA
+                                     // never retries it on its own
+    "failed_release":    null,       // the ref that commit came from
+    "assigned_release":  "v2.2.0",   // what the last verified configuration assigned; null = none
+    "hold":              false,      // true freezes the unit regardless of the assignment
+    "in_progress":       false       // an OTA run holds the lock right now
   },
 
   "detection": {                    // what is actually running, not ML-era names
@@ -292,6 +302,8 @@ This section is the shape of the document. **Device heartbeat**, below, is how i
 The `detection` block replaces `current_threshold`, which reported a value that did not participate in the alert decision (F-09). What is published is now what is actually in force.
 
 `health` is the fail-loud surface. A unit that is running but not detecting must be able to say so, which is the entire F-01/F-02 class.
+
+`ota` is how the panel knows whether a unit runs what it was assigned (D-021). `installed_sha` differing from the assigned tag's commit while `failed_sha` is set means the assignment was tried and rolled back; the panel paints that red. Both `*_release` values are what the OTA script recorded, not a lookup — a unit never needs git to report them.
 
 Coordinates, the legacy battery duplicates, `alert_count_session`, `modem_state`, `solar_error_code`, `solar_device` and `disk_path` are dropped. Nothing reads them.
 
@@ -366,7 +378,11 @@ sites/{site_id}/remote_config.json        written by the backend. read-only to t
 
 The device polls it every `CONFIG_CHECK_INTERVAL` (300 s), on the housekeeping thread, never the capture path, with an explicit timeout (R-5.5). It applies a document only when `config_version` differs from the one in force.
 
-**Delivery depends on the deployment mode (2026-10-24, F-34).** A unit with storage configured reads the blob. A **push-only** unit (no Azure, no `OUTPUT_DIR` — the `QUICKGUIDE.md` provisioning path) has no blob to read, so it polls `GET /api/devices/config` with its device credential instead; the backend serves the blob byte for byte (D-020), so the document, the signature check and the clamping are identical on both paths. Before this, push-only units received no remote configuration at all, which violated the "every threshold remotely tunable without a firmware update" obligation (D-014, D-015). A malformed-but-signed document (non-numeric value, non-object JSON) is a `health.degraded_reason` event, never a crash: it was a crash loop that published a healthy heartbeat between restarts.
+**Delivery depends on the deployment mode (2026-10-24, F-34).** A unit with storage configured reads the blob. A **push-only** unit (no Azure, no `OUTPUT_DIR` — the `QUICKGUIDE.md` provisioning path) has no blob to read, so it polls `GET /api/devices/config` with its device credential instead; the backend serves the exact bytes it signed for that device, so the document, the signature check and the clamping are identical on both paths. Before this, push-only units received no remote configuration at all, which violated the "every threshold remotely tunable without a firmware update" obligation (D-014, D-015). A malformed-but-signed document (non-numeric value, non-object JSON) is a `health.degraded_reason` event, never a crash: it was a crash loop that published a healthy heartbeat between restarts.
+
+**Signed per device (2026-10-24, Rpi-Detector D-020).** The signing key is the device's own `config_key`, derived from its provisioning secret (see **Provisioning secret**). There is no shared key any more. The backend keeps the signed bytes on the device's own record and serves them from there; the site blob holds whichever device's document was published last, which only matters when a site has two devices — and then the push-only route is the one that is always right for each.
+
+**Carries the release assignment (Rpi-Detector D-021).** `release` and `hold` ride inside `config`, under the same signature, next to the thresholds. They are not thresholds: the admin panel sets them through its own controls, the device does not clamp them, and they never reach `RuntimeConfig`. What the device does with them is under **Release assignment** below.
 
 ### Document
 
@@ -375,7 +391,8 @@ The device polls it every `CONFIG_CHECK_INTERVAL` (300 s), on the housekeeping t
   "schema_version":  2,
   "config_version":  "2026-08-22-01",     // any string or number. re-applied only when it changes
   "site":            "zapallar",
-  "device_id":       "Rpi_zapallar",      // optional. null means the whole site
+  "device_id":       "Rpi_zapallar",      // the device whose key signed this. Always set since
+                                           // D-020; a document for another device is skipped
   "issued_utc":      "2026-08-22T14:00:00+00:00",
 
   "config": {                              // all keys optional. missing keys keep their default
@@ -388,7 +405,9 @@ The device polls it every `CONFIG_CHECK_INTERVAL` (300 s), on the housekeeping t
     "psd_f_max":            1000,
     "cooldown_s":           60,
     "heartbeat_interval_s": 60,
-    "window_hop_s":         5.0
+    "window_hop_s":         5.0,
+    "release":              "v2.2.0",      // D-021. git tag the unit converges to. null = none
+    "hold":                 false          // D-021. true = no OTA runs, whatever `release` says
   },
 
   "signature": "9f2c…"                     // hex HMAC-SHA256
@@ -407,9 +426,9 @@ canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
 signature = hmac.new(key.encode(), canonical.encode(), hashlib.sha256).hexdigest()
 ```
 
-The key is `OCEANKIND_CONFIG_HMAC_KEY`, shared between the backend and the device, provisioned to the device in `/etc/oceankind.env`. It is not the storage credential, which is the point: whoever can write the container still cannot forge a configuration (F-10).
+The key is the device's **`config_key`**, derived from its provisioning secret on both sides with a fixed label (see **Provisioning secret**). It is per device: a stolen unit yields a key that forges configuration for that unit alone, and deleting the device in the panel revokes it. It is not the storage credential, which is the point: whoever can write the container still cannot forge a configuration (F-10). `OCEANKIND_CONFIG_HMAC_KEY`, the shared key this section used to name, no longer exists on either side.
 
-Verification is mandatory. The device compares with `hmac.compare_digest`, and a document that fails is discarded **whole**, never partially applied, logged, and named in `health.degraded_reason`. Rejecting a config is a health event, not a debug line. A device with no key configured refuses to apply any remote config at all, rather than accepting unsigned input.
+Verification is mandatory. The device compares with `hmac.compare_digest`, and a document that fails is discarded **whole**, never partially applied, logged, and named in `health.degraded_reason`. Rejecting a config is a health event, not a debug line. A device with no secret configured refuses to apply any remote config at all, rather than accepting unsigned input.
 
 ### Clamping
 
@@ -429,6 +448,24 @@ Applied values appear in `status.json → detection.thresholds`, which closes F-
 | `cooldown_s` | float | 10 – 3600 | 60 | Throttles notifications only. Never suppresses the record (F-03) |
 | `heartbeat_interval_s` | float | 30 – 3600 | 60 | Longer than an hour and liveness detection stops working |
 | `window_hop_s` | float | 1.0 – 5.0 | 5.0 | Step between analysis windows. 5.0 is back-to-back, the calibrated behaviour. Below 5 the windows overlap so an event up to 5−h s always lands whole in one, at CPU cost ×(5/h). Measure on the bench before lowering |
+| `release` | string or null | `^v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}$` | null | Not clamped, not a threshold (D-021). Anything else rejects the whole document — a release name is passed to a shell script, and that regex is what makes it safe to |
+| `hold` | bool | `true` \| `false` | `false` | Not clamped (D-021). A non-boolean rejects the whole document |
+
+### Release assignment (Rpi-Detector D-021)
+
+A release is a git tag on the device repository. The panel assigns one per device (and a fleet default that new devices get at creation); it reaches the unit inside this signed document, so a forged assignment needs that unit's secret.
+
+On every verified configuration the device records `release` and `hold` (`~/oceankind/.assigned_release`, also published in `status.json → ota`). Then, on the housekeeping thread, never the capture path:
+
+- `hold: true` → nothing runs. The unit stays on what it has, and says so in `ota.hold`.
+- `release` null → nothing runs. The unit keeps whatever it runs.
+- `release` equals `ota.installed_release` → nothing to do.
+- `release` equals `ota.failed_release` → nothing runs. That tag already broke this unit and was rolled back; retrying it on its own would be a crash loop. The panel sees `failed_sha` and a human decides.
+- otherwise, and if no OTA holds the lock and the last trigger is older than `OTA_RETRIGGER_S` (1800 s) → the device spawns `update_oceankind.sh --ref <release>` detached, logged to `/tmp/oceankind/logs/update.log`. The script fetches tags, deploys that ref with the journal/snapshot/verify/rollback contract it already had, and on commit writes `.installed_sha` and `.installed_release`; on a verification failure, `.ota_failed_sha` and `.ota_failed_release`.
+
+The daily `oceankind-ota.timer` runs the same script with no argument; it then reads `.assigned_release`, or asks `GET /api/devices/config` itself when that file is absent (an SD-protected unit loses it across the maintenance reboot). It is the safety net for a unit whose service is down and therefore not polling. The OTA never tracks a branch any more: no assignment, no update.
+
+A unit provisioned before D-020 (`OCEANKIND_DEVICE_KEY`, no secret) **refuses to start** on any release that includes D-020, so assigning it one makes the OTA roll back and record the tag as failed. That is the intended outcome, not a defect: it has to be re-provisioned with a new secret first. Use `hold` on such units until then.
 
 ### If the blob is unreachable or unchanged
 
@@ -442,20 +479,21 @@ There is no expiry. A configuration stays in force until a document with a diffe
 
 | | Device (`oceankind/config.py`) | Backend (`routers/devices.py`) | Contract |
 |---|---|---|---|
-| Transport | reads `sites/{site}/remote_config.json`; **push-only units** read `GET /api/devices/config` instead ✓ | **writes the blob.** `GET /api/devices/config` returns it byte for byte and is the delivery path for push-only units | the blob, served two ways |
+| Transport | reads `sites/{site}/remote_config.json`; **push-only units** read `GET /api/devices/config` instead ✓ | **writes the blob** and keeps the signed bytes on the device row. `GET /api/devices/config` returns that row byte for byte and is the delivery path for push-only units | the document, served two ways |
 | Version key | `config_version` ✓ | `config_version` | `config_version` |
 | Signature covers | whole document minus `signature` ✓ | whole document minus `signature` | whole document minus `signature` |
-| Key name | `OCEANKIND_CONFIG_HMAC_KEY` | `OCEANKIND_CONFIG_HMAC_KEY` | `OCEANKIND_CONFIG_HMAC_KEY` |
-| No key configured | refuses to apply ✓ | refuses to publish, 503 | refuses to apply |
+| Key | `config_key` derived from `OCEANKIND_DEVICE_SECRET` (D-020) ✓ | `Device.config_key`, derived from the secret at creation | per device, derived, see **Provisioning secret** |
+| No key configured | refuses to apply ✓ | device created before D-020: refuses to sign, 409 "re-provision" | refuses to apply |
+| `release` / `hold` | verified (tag regex, bool), recorded, acted on by the OTA trigger; never clamped ✓ | set by the release routes, stripped from a tune, signed inside `config` | inside `config`, same signature |
 | v1 flat key names | not accepted ✓ | not accepted | not accepted |
 | Unknown `config` key | rejects whole document, reason in `health.degraded_reason` ✓ | n/a (validated before signing) | rejects whole document |
 | Rejection surface | `health.degraded_reason` + ERROR log, deduped per `config_version` ✓ | 4xx to the operator | a health event, never a debug line |
 
 Device additions beyond the four convergence items, per the prose above: `detection_mode` is runtime-tunable (rejected on bad enum, never clamped), clamp ranges match this document's table exactly (including the Nyquist-after-decimation cap on `psd_f_max`, 6 kHz at the default decimation), inverted PSD bounds are evaluated against the *merged* result of document + in-force values, and a device with no key still runs on its env-file configuration — it simply accepts no remote changes.
 
-The remaining provisioning step: **generate the shared key and put it in both places** (backend secret store, device `/etc/oceankind.env`). Until then the backend refuses to publish and the device refuses to apply, which fails safe on both ends.
+There is no shared-key provisioning step any more. Creating the device in the panel is the whole of it: the one secret it prints is pasted into `/etc/oceankind.env`, and both keys exist on both sides from then on.
 
-The blob is normative because the device side is verified and shipping, and because it needs no device credential to exist first (D-017, D-018 are about a different problem). `GET /api/devices/config` must return this exact document — it is a debugging view for storage units and the only delivery path for push-only units (2026-10-24), so the two can never be allowed to diverge. The backend writer that publishes the blob exists (`services/deviceconfig.publish`, `PUT /api/admin/devices/{id}/config`).
+`GET /api/devices/config` must return the exact document the backend signed for this device — it is a debugging view for storage units and the only delivery path for push-only units (2026-10-24), so the two can never be allowed to diverge. The backend writer that publishes exists (`services/deviceconfig.publish`, `PUT /api/admin/devices/{id}/config`, `PUT /api/admin/devices/{id}/release`).
 
 ---
 
@@ -463,7 +501,7 @@ The blob is normative because the device side is verified and shipping, and beca
 
 **Status: DEVICE SIDE BUILT 2026-08-26; backend endpoint pending.** Specified 2026-08-26 under dashboard D-022 and dashboard R-6.3.
 
-Device implementation: `oceankind/push.py`, wired into the transport worker after the blob write. Verified against a local fake backend enforcing this section (`raspberry-pi/tools/push_test.py`): byte-identical body, header set, idempotent re-post, the full status-code table including 401-stops-everything-and-surfaces-in-health, and the invariant — blob written regardless of push outcome, exercised through the real worker with the backend down. Disabled until `OCEANKIND_BACKEND_URL` + `OCEANKIND_DEVICE_KEY` are provisioned (URL without key refuses to start, R-8.1). Push failures land in a bounded spool (500, oldest dropped and counted — acceptable, the blob has the record) and `status.json → health` gains `push_enabled`, `push_backlog`, `push_rejected`, `push_dropped`.
+Device implementation: `oceankind/push.py`, wired into the transport worker after the blob write. Verified against a local fake backend enforcing this section (`raspberry-pi/tools/push_test.py`): byte-identical body, header set, idempotent re-post, the full status-code table including 401-stops-everything-and-surfaces-in-health, and the invariant — blob written regardless of push outcome, exercised through the real worker with the backend down. Disabled until `OCEANKIND_BACKEND_URL` + `OCEANKIND_DEVICE_SECRET` are provisioned (URL without secret refuses to start, R-8.1). Push failures land in a bounded spool (500, oldest dropped and counted — acceptable, the blob has the record) and `status.json → health` gains `push_enabled`, `push_backlog`, `push_rejected`, `push_dropped`.
 
 One device-side reading of the drain cadence, recorded so the backend side knows: the spool drains **whole** on each heartbeat, sequentially, still one event per request, stopping at the first retryable failure. "One at a time" here governs request granularity, not one-event-per-heartbeat — a week's outage should not take a week to catch up.
 
@@ -487,7 +525,7 @@ The event JSON is roughly 600 bytes against roughly 960 KB for the clip it accom
 ```
 POST /api/devices/events
 X-Device-Id:  Rpi_bench
-X-Device-Key: <the key issued once at registration>
+X-Device-Key: <auth_key derived from the provisioning secret — see Provisioning secret>
 Content-Type: application/json
 
 <the event document, byte-identical to what goes in the blob>
@@ -561,7 +599,7 @@ The POST body is byte-identical to what would be written to `sites/{site_id}/sta
 ```
 POST /api/devices/heartbeat
 X-Device-Id:  Rpi_bench
-X-Device-Key: <the key issued once at registration>
+X-Device-Key: <auth_key derived from the provisioning secret — see Provisioning secret>
 Content-Type: application/json
 
 <the status.json document>
@@ -607,6 +645,56 @@ Every accepted heartbeat writes both tables: `DeviceStatus` is upserted (current
 ### What this does not change
 
 `status.json` in blob storage is still written on every heartbeat by any unit with storage configured, exactly as **`status.json`** above describes. This route is additive — it does not replace the blob, and a unit with storage configured keeps writing it regardless of whether the POST above succeeds. Nothing about `power_history.json`, `acoustic_indicators.json` or `ocean_conditions.json` changes; those remain blob-only, on their own rollup cadence, unrelated to this route.
+
+### What the backend decides from it (D-020)
+
+The heartbeat is also the input to two alerts the device used to send itself. Between one accepted heartbeat and the previous one for the same device: a `health.degraded_reason` that appears, changes text, or clears is a degradation alert (one `DeviceAlert(kind="degraded")` per episode, `detail` = the reason); `power.battery_voltage_v` crossing the battery thresholds for `battery_debounce_heartbeats` consecutive heartbeats, with hysteresis at the recovery voltage, is a battery alert (`kind="battery"`). Thresholds and debounce are backend settings with the device's old defaults (11.8 / 11.2 / 10.8 V, recovery 12.2 V, 10 heartbeats). The device carries no battery state across reboots any more, and does not need to.
+
+---
+
+## Provisioning secret
+
+**Status: BUILT 2026-10-24, both sides (Rpi-Detector D-020).** Replaces two separately pasted values — the device key of D-017 and the shared `OCEANKIND_CONFIG_HMAC_KEY` — with one.
+
+`POST /api/admin/devices` issues one secret (`secrets.token_urlsafe(32)`), shown once, never stored. Both sides derive two keys from it with fixed labels:
+
+```python
+auth_key   = hmac.new(secret.encode(), b"oceankind:auth:v1",   hashlib.sha256).hexdigest()
+config_key = hmac.new(secret.encode(), b"oceankind:config:v1", hashlib.sha256).hexdigest()
+```
+
+| | Device (`oceankind/config.py`) | Backend (`core/security.derive_keys`) |
+|---|---|---|
+| Holds | `OCEANKIND_DEVICE_SECRET` in `/etc/oceankind.env`, mode 600 | neither the secret nor `auth_key`: `argon2(auth_key)` in `Device.key_hash`, and `config_key` in clear in `Device.config_key` (a signer has to hold its key) |
+| Presents | `X-Device-Key: <auth_key>` on every device route | — |
+| Verifies | configuration signatures with `config_key` | `X-Device-Key` against `key_hash` |
+
+**Why derive rather than paste two values.** One paste at provisioning is one thing to get wrong instead of two, and the two keys stay different: the one on the wire for every request is not the one that signs configuration, so a log that leaks `X-Device-Key` does not forge a configuration. **Why per device.** A stolen unit yields keys good for that unit alone; deleting the device in the panel revokes both at once; a shared key would have meant re-provisioning the whole fleet on one theft.
+
+**The secret itself is never the credential on the wire.** A device that presents the raw secret as `X-Device-Key` gets `401`. `tests/test_auth_and_access.py` asserts this.
+
+**Migration.** A device created before D-020 has `Device.config_key = NULL`. It still authenticates with its old key (its `key_hash` is unchanged), pushes and heartbeats normally, but no configuration or release can be signed for it: those routes answer `409` naming the fix, `GET /api/devices/config` answers `409`, and the panel lists it as *re-provisionar*. The fix is to delete and re-create the device and paste the new secret into the unit — one line in `/etc/oceankind.env`, `OCEANKIND_DEVICE_KEY` removed, `OCEANKIND_DEVICE_SECRET` added. A unit that updates to D-020 code with the old variable still in its env refuses to start and names this.
+
+---
+
+## Alerting
+
+**Status: BUILT 2026-10-24 (Rpi-Detector D-020).** The device sends nothing to any human. Every WhatsApp and voice alert leaves from the backend, with the one Twilio credential, held there on behalf of the fleet.
+
+Everything an alert needs already crosses this contract: detections by **Event upload**, health and battery by **Device heartbeat**, and absence by the backend's silence watcher — the one alert a dead device can never send about itself, and the reason this had to move. What the backend sends, and from which field:
+
+| Alert | Trigger | Recipients |
+|---|---|---|
+| Detection | an event indexed for the first time via push with `suppressed: false` | `ALERT_TO` — WhatsApp with the `?play=` link when `clip.uploaded` |
+| Cluster call | `call_cluster_count` events (suppressed included) at one site inside `call_cluster_window_s` | `CALL_TO` — voice, at most once per `call_cooldown_s` |
+| Silence / recovery | no heartbeat or blob for `silence_after_missed_heartbeats` intervals (`services/silence.py`) | `TECH_TO` |
+| Degraded / recovered | `health.degraded_reason` appears, changes or clears between two heartbeats | `TECH_TO` |
+| Battery | `power.battery_voltage_v` below a threshold for `battery_debounce_heartbeats` heartbeats | `TECH_TO` |
+| Heartbeat message | every `alert_heartbeat_hours`, from the latest `status.json` of each site | `TECH_TO` |
+
+Without Twilio configured the backend is **log-only**: each of these is recorded (`DeviceAlert` rows where there is a row to record), shown on the dashboard, and `/api/health` says `alerts: log-only`. Nobody is paged, and the system says so at boot. Transport and templates: `_Dashboard-Detector/backend/app/services/alerts.py`; settings in its `.env.example`.
+
+What this removes from the device: `notify.py` entirely (Twilio, IoT Hub, the pending-alert spool), `OCEANKIND_TWILIO_*`, `OCEANKIND_TO_*`, `OCEANKIND_CALL_*`, `OCEANKIND_WA_TPL_*`, `OCEANKIND_DASHBOARD_URL`, `OCEANKIND_ALLOW_NO_TWILIO`, `OCEANKIND_BENCH`, `OCEANKIND_IOTHUB_*`, the `twilio` and `azure-iot-device` dependencies, and `health.alerts_enabled` / `health.wa_pending`. The device still logs every degradation at ERROR level as it always did; the heartbeat is how it reaches a human.
 
 ---
 

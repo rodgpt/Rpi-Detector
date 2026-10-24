@@ -6,8 +6,22 @@
 # Installs the PRODUCTION system (src/marfutura_iot_audio.py). The previous
 # version of this script installed main.py, the abandoned prototype now in
 # legacy/ (F-11). Do not point ExecStart anywhere else.
+#
+# Flags:
+#   --live-env   install raspberry-pi/oceankind.env (the gitignored live file)
+#                as /etc/oceankind.env when none exists. Off by default since
+#                D-020: the normal path is the template plus ONE secret pasted
+#                from the admin panel; the live file is a dev-machine artefact.
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
+
+INSTALL_LIVE_ENV=0
+for arg in "$@"; do
+    case "$arg" in
+        --live-env) INSTALL_LIVE_ENV=1 ;;
+        *) echo "unknown flag: $arg (known: --live-env)"; exit 64 ;;
+    esac
+done
 
 # Service user. MUST agree with protect_sd.sh, which uses the same expression
 # (F-17: the two scripts disagreeing meant clips could land outside the tmpfs
@@ -160,43 +174,39 @@ WantedBy=multi-user.target
 SERVICE_EOF
 
 # ── 7. Environment file ───────────────────────────────────────────────────────
-# Preferred source: raspberry-pi/oceankind.env — the gitignored live config
-# (real Twilio credentials, per-unit identity). Falls back to a blank template.
+# Default: a template with exactly what a unit needs — identity, the backend
+# URL, the ONE secret the admin panel printed (D-020), audio. With --live-env,
+# raspberry-pi/oceankind.env (gitignored) is installed instead when present.
 LIVE_ENV="${SCRIPT_DIR}/../oceankind.env"
-if [ ! -f /etc/oceankind.env ] && [ -f "${LIVE_ENV}" ]; then
+if [ ! -f /etc/oceankind.env ] && [ "${INSTALL_LIVE_ENV}" = 1 ] && [ -f "${LIVE_ENV}" ]; then
     install -m 600 "${LIVE_ENV}" /etc/oceankind.env
-    echo "Live configuration installed to /etc/oceankind.env from ${LIVE_ENV}"
-    echo "⚠️  REMINDER: the Twilio token in it is pending rotation (F-04)."
+    echo "Live configuration installed to /etc/oceankind.env from ${LIVE_ENV} (--live-env)"
 elif [ ! -f /etc/oceankind.env ]; then
     cat > /etc/oceankind.env << 'ENV_EOF'
 # OceanKind — per-unit configuration. THE ONLY place secrets live (F-04).
 # The service refuses to start until the REQUIRED values are filled in.
+#
+# No phone numbers, no Twilio, no bench flag here (D-020): every alert to a
+# human leaves from the backend, driven by what this unit already sends it.
 
-# ── Identity — v2 contract: SITE and coordinates REQUIRED with storage ──
+# ── Identity — must match the device you created in Admin → Dispositivos ──
 OCEANKIND_DEVICE_ID=
 # Site id: everything writes under sites/{id}/ in the v2 container. [a-z0-9_-] only.
 OCEANKIND_SITE=
 OCEANKIND_SENSOR_LOCATION=
-# Unit coordinates — go into _sites.json; set at provisioning, never in source (F-08)
+# Unit coordinates — go into _sites.json; set at provisioning, never in source (F-08).
+# Only used when Azure storage is configured below.
 OCEANKIND_SENSOR_LAT=
 OCEANKIND_SENSOR_LON=
 
-# ── Secrets ──
-# No Twilio yet? Leave the next two lines exactly as they are: the unit runs as a
-# declared bench (the dashboard shows "banco, sin Twilio") and cannot page
-# anyone. When you have credentials: fill in SID/TOKEN below and delete BOTH
-# lines together (D-019). One without the other refuses to start on purpose —
-# a unit that reports to the dashboard but cannot reach a human must say so.
-OCEANKIND_ALLOW_NO_TWILIO=1
-OCEANKIND_BENCH=1
-OCEANKIND_TWILIO_SID=
-OCEANKIND_TWILIO_TOKEN=
-
-# ── Dashboard backend: direct event push, in addition to the blob ──
-# Per-device key issued at registration; empty URL = push disabled (index
-# updates via reconcile only). URL without key = refuse to start.
+# ── Dashboard backend ──
+# Base URL only (no /api/...). Empty = no push, no heartbeat, nobody alerted.
 OCEANKIND_BACKEND_URL=
-OCEANKIND_DEVICE_KEY=
+# THE secret, shown once when the device was created in the panel. From it the
+# unit derives its authentication key and its configuration-verification key
+# (contract §Provisioning secret). URL without secret = refuse to start.
+# If lost: delete the device in the panel, create it again, paste the new one.
+OCEANKIND_DEVICE_SECRET=
 
 # ── Audio (continuous capture; device matched BY NAME, never by index) ──
 # Codec Zero is the project's ADC (D-009). Its exact ALSA card name isn't
@@ -211,44 +221,40 @@ OCEANKIND_AUDIO_DEVICE_NAME=codec
 # OCEANKIND_AUDIO_SOURCE=synthetic:sporadic
 # OCEANKIND_SYNTHETIC_SPORADIC_MEAN_S=720
 
-# ── Detection (defaults are sane; remotely tunable via remote_config.json) ──
+# ── Detection (defaults are sane; tuned from the panel, signed per device) ──
+# Initial values only. Admin → Dispositivos → Configurar changes them live;
+# the unit verifies the document with the key derived from its secret (F-10).
 # OCEANKIND_DETECTION_MODE=psd        # psd | rms | auto
 # OCEANKIND_SCORE_MIN=0.60
 # OCEANKIND_ALERT_MIN_RMS=0.010
 # OCEANKIND_DETECTION_LABEL=MOTOR
-# OCEANKIND_CONFIG_HMAC_KEY=          # REQUIRED for remote config: without it the
-                                      # device refuses all remote tuning (F-10).
-                                      # Same key lives in the backend secret store.
 
-# ── Notification routing ─────────────────────────────────
-OCEANKIND_TWILIO_FROM=
-OCEANKIND_TWILIO_TO=
-# OCEANKIND_TO_ALERTA=
-# OCEANKIND_TO_TECNICO=
-# OCEANKIND_CALL_TO=
-
-# ── Azure (optional; without them the unit runs local-only) ──
+# ── Azure blob storage (optional; without it the unit is push-only) ──
 # Use the NEW v2 storage account/container, not the prototypes' blob (D-016).
 OCEANKIND_STORAGE_CONNECTION_STRING=
 OCEANKIND_STORAGE_CONTAINER=alerts
-OCEANKIND_IOTHUB_CONNECTION_STRING=
 ENV_EOF
     chmod 600 /etc/oceankind.env
     echo "Environment template written to /etc/oceankind.env — FILL IT IN before starting."
 fi
 
-# ── 7a. Env migrations (idempotent; re-running setup.sh is the update path) ──
-# D-019 (2026-10-24): ALLOW_NO_TWILIO=1 together with a backend URL now refuses
-# to start unless the unit declares itself a bench. Every unit provisioned from
-# QUICKGUIDE before that date has the first two and not the third. Add it here
-# so an update never strands a unit over a line nobody knew to add. A unit that
-# later gets real Twilio credentials deletes both lines by hand (see template).
+# ── 7a. Env generation check (re-running setup.sh is the update path) ─────────
+# D-020 (2026-10-24): one secret per device replaces OCEANKIND_DEVICE_KEY and
+# OCEANKIND_CONFIG_HMAC_KEY. A unit still carrying the old key and no secret
+# REFUSES TO START on this code, on purpose — it could authenticate but never
+# verify a configuration or a release. Nothing here can mint the secret (only
+# the panel can), so the only honest move is to say exactly what to do.
 if [ -f /etc/oceankind.env ] \
-   && grep -qE '^[[:space:]]*OCEANKIND_ALLOW_NO_TWILIO=1' /etc/oceankind.env \
-   && ! grep -qE '^[[:space:]]*OCEANKIND_BENCH=' /etc/oceankind.env; then
-    printf '\n# Added by setup.sh %s (D-019): this unit runs without Twilio and declares it.\n# Delete this line together with ALLOW_NO_TWILIO once real credentials are filled in.\nOCEANKIND_BENCH=1\n' \
-        "$(date +%F)" >> /etc/oceankind.env
-    echo "D-019: OCEANKIND_BENCH=1 appended to /etc/oceankind.env (unit declared as bench, no Twilio)."
+   && grep -qE '^[[:space:]]*OCEANKIND_DEVICE_KEY=.+' /etc/oceankind.env \
+   && ! grep -qE '^[[:space:]]*OCEANKIND_DEVICE_SECRET=.+' /etc/oceankind.env; then
+    echo ""
+    echo "⚠️  D-020: /etc/oceankind.env has OCEANKIND_DEVICE_KEY (pre-2026-10-24) and no"
+    echo "   OCEANKIND_DEVICE_SECRET. The service WILL REFUSE TO START until you:"
+    echo "     1. delete this device in Admin → Dispositivos and create it again"
+    echo "     2. put the new secret in /etc/oceankind.env as OCEANKIND_DEVICE_SECRET="
+    echo "     3. remove the OCEANKIND_DEVICE_KEY line"
+    echo "   Twilio/IoT/BENCH lines in the file are ignored and can be deleted."
+    echo ""
 fi
 
 # ── 7b. OTA boot unit ─────────────────────────────────────────────────────────
@@ -276,20 +282,57 @@ StandardError=journal
 WantedBy=multi-user.target
 BOOT_EOF
 
+# ── 7c. OTA daily timer (D-021) ───────────────────────────────────────────────
+# The normal update path is the service itself: it sees a release assigned in
+# its signed configuration and launches update_oceankind.sh --ref <tag>. This
+# timer is the safety net for a unit whose service is down and therefore not
+# polling: once a day it converges to .assigned_release (or asks the backend).
+# It never tracks a branch — with no assignment it does nothing.
+cat > /etc/systemd/system/oceankind-ota.service << OTA_EOF
+[Unit]
+Description=OceanKind OTA — converge to the assigned release (D-021)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=${SERVICE_USER}
+TimeoutStartSec=1800
+ExecStart=/bin/bash ${OCEANKIND_DIR}/update_oceankind.sh
+StandardOutput=journal
+StandardError=journal
+OTA_EOF
+
+cat > /etc/systemd/system/oceankind-ota.timer << TIMER_EOF
+[Unit]
+Description=OceanKind OTA daily convergence (D-021)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMER_EOF
+
 # ── 8. Enable service ─────────────────────────────────────────────────────────
 systemctl daemon-reload
 systemctl enable oceankind
 systemctl enable oceankind-ota-boot
+systemctl enable --now oceankind-ota.timer
 
 echo ""
 echo "======================================================"
 echo "  Setup complete."
 echo ""
 echo "  Next steps:"
-echo "  1. Edit /etc/oceankind.env  (device ID, site, coords, Twilio, Azure)"
+echo "  1. Edit /etc/oceankind.env  (device ID, site, backend URL, the ONE secret"
+echo "     from Admin → Dispositivos; Azure only if this unit also writes blobs)"
 echo "  2. Reboot: sudo reboot"
 echo "  3. Check:  sudo systemctl status oceankind"
 echo "  4. Logs:   journalctl -u oceankind -f"
+echo "  Updates arrive from the panel (assign a release to this device)."
 echo ""
 echo "  Dependencies live in ${VENV_DIR}, not the system Python."
 echo "  To run anything that imports the oceankind package by hand, use"

@@ -94,9 +94,9 @@ Schemas in `docs/DATA-CONTRACT.md`. **This repository holds the canonical copy; 
 
 **`model.joblib` is currently unused.** Nothing loads it. The ML-era naming and stub loader were retired in Phase 1 (`SCORE_MIN`, `DETECTION_LABEL` — the `FILTRO` pool-filter label is gone); the model returns as the second registry detector in Phase 3.
 
-**The service refuses to start without secrets.** Since Phase 1, missing Twilio credentials are a startup failure, not a silent default (F-04). Bench units without Twilio set `OCEANKIND_ALLOW_NO_TWILIO=1`, which is declared in `health.degraded_reason`. Detection modes are `psd` | `rms` | `auto`, and every one of them can genuinely fire (F-01 fixed).
+**The device holds exactly one secret and notifies nobody.** Since D-020 (2026-10-24) there is no Twilio, no IoT Hub and no phone number on the unit: the backend sends every alert from what the unit pushes to it. `/etc/oceankind.env` carries `OCEANKIND_DEVICE_SECRET`, issued once by the admin panel; the auth key and the config-verification key are derived from it. A unit still carrying the older `OCEANKIND_DEVICE_KEY` refuses to start and says how to re-provision (F-04 closed; R-8.1). Detection modes are `psd` | `rms` | `auto`, and every one of them can genuinely fire (F-01 fixed).
 
-**`scripts/update_oceankind.sh` can strand the node.** Two reboots, no rollback, no physical access. Treat every invocation as dangerous.
+**`scripts/update_oceankind.sh` only moves toward a release assigned from the dashboard.** It never tracks `main` (D-021). It is journaled, snapshots the install, verifies for 60 s and rolls back; two workstation harnesses cut it at every command. What remains unproven is the same script on real hardware — see `raspberry-pi/docs/OTA-FAULT-TESTING.md` §5.
 
 **Writes go to RAM.** The overlay filesystem means anything written at runtime consumes memory and vanishes on reboot. The clip archive caps at 300 files (~290 MB) since Phase 1; discards are published in `health.clips_dropped`.
 

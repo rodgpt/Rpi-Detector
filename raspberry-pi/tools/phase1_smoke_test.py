@@ -8,7 +8,8 @@ Exercises the pure-function surface of the oceankind package:
   5. non-finite float sanitisation (R-4.6)
   6. decide(): every mode can genuinely fire (F-01)
   7. overlapping analysis windows (window_hop_s)
-  8. signed remote config, contract-converged (F-10): accept/reject matrix
+  8. signed remote config, contract-converged (F-10, D-020): accept/reject matrix
+  9. watchdog; 10. startup validation (D-020); 11-12. spool; 13. OTA trigger (D-021)
 """
 import os
 import sys
@@ -18,9 +19,10 @@ from pathlib import Path
 
 import numpy as np
 
+_INSTALL = tempfile.mkdtemp(prefix="ok_install_")
 os.environ.update({
-    "OCEANKIND_ALLOW_NO_TWILIO": "1",
     "OCEANKIND_STATE_DIR": tempfile.mkdtemp(prefix="ok_state_"),
+    "OCEANKIND_INSTALL_DIR": _INSTALL,
 })
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from oceankind import config as C            # noqa: E402
@@ -73,8 +75,8 @@ for _ in range(C.DETECTOR_FAIL_LIMIT):
 check("detector_ok false after consecutive failures", not health.detector_ok())
 h = health.build_health()
 check("degraded_reason names the detector", h["detector_ok"] is False and "clasificador" in (h["degraded_reason"] or ""))
-check("bench mode is a boolean, NOT a degradation", h["alerts_enabled"] is False
-      and "Twilio" not in (h["degraded_reason"] or ""))
+check("no alerting state in health any more (D-020: the backend alerts)",
+      "alerts_enabled" not in h and "wa_pending" not in h and "Twilio" not in (h["degraded_reason"] or ""))
 health.record_classify_result(True)
 check("recovery resets", health.detector_ok() and health.build_health()["detector_ok"] is True)
 
@@ -145,8 +147,7 @@ print("4. health block completeness")
 h = health.build_health()
 for key in ("detector_ok", "audio_ok", "capture_ok", "duty_cycle_pct", "deaf_seconds_total",
             "last_clip_age_s", "clips_dropped", "capture_overflows", "suppressed_count",
-            "upload_backlog", "events_dropped", "wa_pending", "archive_queue",
-            "alerts_enabled", "degraded_reason"):
+            "upload_backlog", "events_dropped", "archive_queue", "degraded_reason"):
     check(f"health.{key} present", key in h)
 
 print("5. non-finite floats (R-4.6)")
@@ -218,7 +219,7 @@ clamped = C.CONFIG.apply({"window_hop_s": 0.1})   # bajo el mínimo → clamp a 
 check("hop clampeado a >=1.0", C.CONFIG.snapshot()["window_hop_s"] == 1.0, f"({clamped})")
 C.CONFIG.apply({"window_hop_s": 5.0})
 
-print("8. remote config: contract-converged verification (F-10)")
+print("8. remote config: contract-converged verification (F-10, D-020 per-device key)")
 import hashlib as _hl
 import hmac as _hm
 import json as _json
@@ -235,25 +236,37 @@ def _signed_doc(key, cfg, version="2026-08-22-01", device_id=None, tamper=False)
     return doc
 
 
-try:
-    C.verify_remote_config(_signed_doc("k", {"score_min": 0.7}))
-    check("no key -> whole doc rejected", False)
-except C.ConfigRejected as e:
-    check("no key -> whole doc rejected", "HMAC_KEY" in str(e))
+# One secret, two derived keys — the contract's exact formulas (§Provisioning secret)
+SECRET = "test-secret-0123456789abcdef"
+_auth, _cfgkey = C.derive_keys(SECRET)
+check("derive_keys: auth = HMAC(secret, 'oceankind:auth:v1')",
+      _auth == _hm.new(SECRET.encode(), b"oceankind:auth:v1", _hl.sha256).hexdigest())
+check("derive_keys: config = HMAC(secret, 'oceankind:config:v1')",
+      _cfgkey == _hm.new(SECRET.encode(), b"oceankind:config:v1", _hl.sha256).hexdigest())
+check("the two keys differ (wire key never signs config)", _auth != _cfgkey and len(_auth) == 64)
 
-C.CONFIG_HMAC_KEY = "test-key-123"
 try:
-    vals = C.verify_remote_config(_signed_doc("test-key-123", {"score_min": 0.7, "window_hop_s": 2.5}))
+    C.verify_remote_config(_signed_doc(_cfgkey, {"score_min": 0.7}))
+    check("no secret -> whole doc rejected", False)
+except C.ConfigRejected as e:
+    check("no secret -> whole doc rejected", "DEVICE_SECRET" in str(e))
+
+C.CONFIG_KEY = _cfgkey
+try:
+    vals = C.verify_remote_config(_signed_doc(_cfgkey, {"score_min": 0.7, "window_hop_s": 2.5}))
     check("valid signature over whole doc accepted", vals == {"score_min": 0.7, "window_hop_s": 2.5})
 except C.ConfigRejected as e:
     check("valid signature over whole doc accepted", False, f"({e})")
 
 for name, doc in (
-    ("tampered doc rejected", _signed_doc("test-key-123", {"score_min": 0.7}, tamper=True)),
+    ("tampered doc rejected", _signed_doc(_cfgkey, {"score_min": 0.7}, tamper=True)),
     ("wrong key rejected", _signed_doc("other-key", {"score_min": 0.7})),
-    ("unknown config key rejects WHOLE doc", _signed_doc("test-key-123", {"score_mim": 0.7})),
-    ("bad detection_mode rejected", _signed_doc("test-key-123", {"detection_mode": "ml"})),
-    ("inverted PSD band rejected", _signed_doc("test-key-123", {"psd_f_min": 1500, "psd_f_max": 300})),
+    ("signed with the AUTH key rejected (keys are not interchangeable)", _signed_doc(_auth, {"score_min": 0.7})),
+    ("unknown config key rejects WHOLE doc", _signed_doc(_cfgkey, {"score_mim": 0.7})),
+    ("bad detection_mode rejected", _signed_doc(_cfgkey, {"detection_mode": "ml"})),
+    ("inverted PSD band rejected", _signed_doc(_cfgkey, {"psd_f_min": 1500, "psd_f_max": 300})),
+    ("release that is not a tag rejected (D-021)", _signed_doc(_cfgkey, {"release": "main; rm -rf /"})),
+    ("non-boolean hold rejected (D-021)", _signed_doc(_cfgkey, {"hold": "yes"})),
 ):
     try:
         C.verify_remote_config(doc)
@@ -261,14 +274,19 @@ for name, doc in (
     except C.ConfigRejected:
         check(name, True)
 
-other = C.verify_remote_config(_signed_doc("test-key-123", {"score_min": 0.9}, device_id="Rpi_otra"))
+vals = C.verify_remote_config(_signed_doc(_cfgkey, {"score_min": 0.7, "release": "v2.2.0", "hold": False}))
+check("release/hold accepted inside config (D-021)", vals["release"] == "v2.2.0" and vals["hold"] is False)
+C.CONFIG.apply(vals)
+check("release/hold never reach RuntimeConfig", "release" not in C.CONFIG.snapshot()
+      and not hasattr(C.CONFIG, "release"))
+other = C.verify_remote_config(_signed_doc(_cfgkey, {"score_min": 0.9}, device_id="Rpi_otra"))
 check("doc for another device_id skipped, not rejected", other is None)
 changes = C.CONFIG.apply({"detection_mode": "auto", "score_min": 0.99})
 check("apply: mode switches, out-of-range clamped to 0.95",
       C.CONFIG.snapshot()["detection_mode"] == "auto"
       and C.CONFIG.snapshot()["score_min"] == 0.95, f"({changes})")
 C.CONFIG.apply({"detection_mode": "psd", "score_min": 0.6})
-C.CONFIG_HMAC_KEY = ""
+C.CONFIG_KEY = ""
 
 print("9. watchdog: pings while threads beat, starves when one hangs (R-2.7)")
 import socket as _socket  # noqa: E402
@@ -310,29 +328,37 @@ except TimeoutError:
 _rx.close()
 del os.environ["NOTIFY_SOCKET"]
 
-print("10. startup validation")
-check("bench escape hatch allows start", C.TWILIO_CONFIGURED is False and C.ALLOW_NO_TWILIO is True)
+print("10. startup validation (D-020: one secret, no Twilio anywhere on the device)")
+check("no Twilio/bench settings exist any more",
+      not any(hasattr(C, n) for n in ("TWILIO_CONFIGURED", "ALLOW_NO_TWILIO", "BENCH",
+                                      "CONFIG_HMAC_KEY", "DEVICE_KEY", "IOTHUB_ENABLED")))
 try:
     C.validate_startup_config()
-    check("validate passes with ALLOW_NO_TWILIO (no backend, no storage)", True)
+    check("validate passes with no backend and no storage (bench by hand)", True)
 except SystemExit:
-    check("validate passes with ALLOW_NO_TWILIO (no backend, no storage)", False)
+    check("validate passes with no backend and no storage (bench by hand)", False)
 
-# D-019: a unit that reaches the backend but cannot reach a human must declare
-# itself a bench (OCEANKIND_BENCH=1) or refuse to start.
-C.BACKEND_URL, C.DEVICE_KEY, C.SITE = "https://backend.example", "k", "banco"
-try:
-    C.validate_startup_config()
-    check("ALLOW_NO_TWILIO + BACKEND_URL without OCEANKIND_BENCH refuses to start", False)
-except SystemExit:
-    check("ALLOW_NO_TWILIO + BACKEND_URL without OCEANKIND_BENCH refuses to start", True)
-C.BENCH = True
-try:
-    C.validate_startup_config()
-    check("…and starts once OCEANKIND_BENCH=1 is declared", True)
-except SystemExit:
-    check("…and starts once OCEANKIND_BENCH=1 is declared", False)
-C.BENCH, C.BACKEND_URL, C.DEVICE_KEY, C.SITE = False, "", "", ""
+
+def _refuses():
+    try:
+        C.validate_startup_config()
+        return False
+    except SystemExit:
+        return True
+
+
+C.BACKEND_URL, C.SITE = "https://backend.example", "banco"
+C.DEVICE_SECRET = ""
+check("BACKEND_URL without DEVICE_SECRET refuses to start", _refuses())
+C.DEVICE_SECRET = SECRET
+check("…and starts with the secret", not _refuses())
+# A unit provisioned before D-020: old key present, no secret. Must refuse and
+# name the fix — it could authenticate but never verify a config or a release.
+C.DEVICE_SECRET, C.LEGACY_DEVICE_KEY = "", "old-device-key"
+check("legacy OCEANKIND_DEVICE_KEY without secret refuses to start (re-provision)", _refuses())
+C.BACKEND_URL = ""
+check("…even with no backend URL (the variable itself is the signal)", _refuses())
+C.LEGACY_DEVICE_KEY, C.SITE = "", ""
 
 print("11. upload backlog is a degradation after UPLOAD_BACKLOG_ALERT_TICKS heartbeats")
 _saved_spool = C.EVENT_SPOOL_DIR
@@ -361,6 +387,48 @@ _storage.drain_event_spool()
 check("2 unreadable spool files counted as dropped",
       health.build_health()["events_dropped"] == _before + 2 and not list(C.EVENT_SPOOL_DIR.glob("*.json")))
 C.EVENT_SPOOL_DIR = _saved_spool
+
+print("13. OTA trigger converges to the ASSIGNED release and nothing else (D-021)")
+from oceankind import ota as _ota  # noqa: E402
+import subprocess as _sp  # noqa: E402
+
+_launched = []
+_real_popen = _sp.Popen
+_sp.Popen = lambda argv, **kw: _launched.append(argv)   # the script is not run here
+blk = _ota.status_block()
+check("ota block has every key, all null/false before anything happened",
+      set(blk) == {"installed_sha", "installed_release", "failed_sha", "failed_release",
+                   "assigned_release", "hold", "in_progress"}
+      and blk["installed_sha"] is None and blk["in_progress"] is False)
+check("no assignment -> nothing launched", _ota.maybe_trigger() == "none" and not _launched)
+_ota.record_assignment("v2.2.0", True)
+check("hold -> nothing launched even with a release", _ota.maybe_trigger() == "hold" and not _launched)
+check("assignment persisted for the daily timer",
+      (Path(_INSTALL) / ".assigned_release").read_text().split() == ["v2.2.0", "1"])
+_ota.record_assignment("v2.2.0", False)
+(Path(_INSTALL) / ".installed_release").write_text("v2.2.0\n")
+check("already on the assigned release -> current", _ota.maybe_trigger() == "current" and not _launched)
+(Path(_INSTALL) / ".installed_release").write_text("v2.1.0\n")
+(Path(_INSTALL) / ".ota_failed_release").write_text("v2.2.0\n")
+check("release that already failed here -> never relaunched", _ota.maybe_trigger() == "failed" and not _launched)
+(Path(_INSTALL) / ".ota_failed_release").unlink()
+check("no script installed -> loud, not launched", _ota.maybe_trigger() == "no-script" and not _launched)
+(Path(_INSTALL) / "update_oceankind.sh").write_text("#!/bin/bash\nexit 0\n")
+check("launched with --ref <tag> as argv, no shell",
+      _ota.maybe_trigger() == "launched" and _launched
+      and _launched[-1][1:] == [str(C.OTA_SCRIPT), "--ref", "v2.2.0"])
+check("same assignment inside the cooldown is not relaunched", _ota.maybe_trigger() == "cooldown" and len(_launched) == 1)
+_ota._last_trigger_mono = 0.0
+C.OTA_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+(C.OTA_LOCK_DIR / "pid").write_text(str(os.getpid()))
+check("another OTA holding the lock -> busy", _ota.maybe_trigger() == "busy" and len(_launched) == 1)
+(C.OTA_LOCK_DIR / "pid").write_text("999999")
+check("orphan lock (dead pid) does not count as busy", _ota.maybe_trigger() == "launched" and len(_launched) == 2)
+import shutil as _sh  # noqa: E402
+_sh.rmtree(C.OTA_LOCK_DIR)
+_sp.Popen = _real_popen
+check("status block reflects the assignment", _ota.status_block()["assigned_release"] == "v2.2.0"
+      and _ota.status_block()["installed_release"] == "v2.1.0")
 
 print()
 if FAILURES:

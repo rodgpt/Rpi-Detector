@@ -2,11 +2,30 @@
 # =============================================================================
 # OceanKind — Actualización OTA con verificación y rollback, a prueba de cortes
 #
-# Uso manual:   bash ~/oceankind/update_oceankind.sh
-# Cron diario:  0 3 * * * bash ~/oceankind/update_oceankind.sh >> /tmp/oceankind/logs/update.log 2>&1
-# Al arrancar:  oceankind-ota-boot.service  →  update_oceankind.sh --boot
-#               (lo instala setup.sh; repara una OTA que se cortó y ejecuta la
-#               ventana de mantenimiento en unidades con overlay)
+# Desde el panel:  el servicio (oceankind/ota.py) lanza
+#                  update_oceankind.sh --ref <tag>  al ver una release asignada
+#                  en su configuración firmada (D-021). Es el camino normal.
+# Timer diario:    oceankind-ota.timer → update_oceankind.sh  (sin argumento:
+#                  converge a .assigned_release, o pregunta al backend si ese
+#                  fichero no está). Red de seguridad para una unidad caída.
+# Manual:          bash ~/oceankind/update_oceankind.sh [--ref <tag>]
+# Al arrancar:     oceankind-ota-boot.service  →  update_oceankind.sh --boot
+#                  (lo instala setup.sh; repara una OTA que se cortó y ejecuta
+#                  la ventana de mantenimiento en unidades con overlay)
+#
+# ── Releases asignadas (D-021) ───────────────────────────────────────────────
+# El OTA ya NO sigue una rama. El objetivo es siempre un ref concreto (un tag
+# git), decidido en el panel por unidad. Sin asignación no hay actualización.
+#   --ref <tag>           lo que el servicio pide; manda sobre todo lo demás
+#   .assigned_release     "<tag|-> <hold 0|1>", escrito por el servicio al
+#                         verificar una config; lo lee el timer
+#   backend               GET /api/devices/config con la credencial de
+#                         /etc/oceankind.env, cuando el fichero no está (una
+#                         unidad con overlay lo pierde al reiniciar a la
+#                         ventana de mantenimiento)
+# Al confirmar se escriben .installed_sha Y .installed_release; al fallar la
+# verificación, .ota_failed_sha Y .ota_failed_release. El servicio los lee
+# para status.json → ota y para no relanzar un tag que ya rompió esta unidad.
 #
 # ── Layout (ÚNICA definición; setup.sh instala este script en ~/oceankind) ────
 #   ~/oceankind/code/      checkout git — la FUENTE de las actualizaciones OTA
@@ -90,10 +109,19 @@ UNIT_DIR="${OCEANKIND_UNIT_DIR:-/etc/systemd/system}"
 RUN_DIR="${OCEANKIND_RUN_DIR:-/tmp/oceankind}"
 
 FAILED_SHA_FILE="$OCEANKIND_DIR/.ota_failed_sha"
+FAILED_REF_FILE="$OCEANKIND_DIR/.ota_failed_release"
 # Qué commit está REALMENTE instalado y VERIFICADO. No el HEAD del checkout: el
-# checkout no es lo que corre. Vacío en una unidad provisionada por rsync: se
-# fuerza el deploy para reconciliar, en vez de asumir que coinciden.
+# checkout no es lo que corre. Vacío en una unidad provisionada por setup.sh:
+# se fuerza el deploy para reconciliar, en vez de asumir que coinciden.
 INSTALLED_SHA_FILE="$OCEANKIND_DIR/.installed_sha"
+INSTALLED_REF_FILE="$OCEANKIND_DIR/.installed_release"
+ASSIGNED_FILE="$OCEANKIND_DIR/.assigned_release"
+ENV_FILE="${OCEANKIND_ENV_FILE:-/etc/oceankind.env}"
+# El ref objetivo de ESTA ejecución (tag). Lo fija --ref o resolve_target.
+TARGET_REF=""
+# Sólo esto puede ser un nombre de release (contrato §Device configuration):
+# acaba en una línea de comandos de git, y esta expresión es lo que lo hace seguro.
+REF_RE='^v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}$'
 JOURNAL="$OCEANKIND_DIR/.ota_journal"
 SNAP_DIR="$OCEANKIND_DIR/.snapshot"
 SD_MARK="$OCEANKIND_DIR/.sd_protection"
@@ -194,7 +222,10 @@ ensure_repo() {
 }
 
 fetch_target() {
-    if tmo 300 git $GIT_NET -C "$REPO_DIR" fetch --quiet origin "$REPO_BRANCH" 2>&1; then
+    # Tags, no una rama: el objetivo es un ref concreto (D-021). --force porque
+    # un tag movido en el remoto debe ganar al local; --prune-tags para no
+    # conservar tags borrados.
+    if tmo 300 git $GIT_NET -C "$REPO_DIR" fetch --quiet --force --tags --prune --prune-tags origin 2>&1; then
         return 0
     fi
     log "fetch falló."
@@ -209,6 +240,95 @@ fetch_target() {
 }
 
 installed_sha() { [ -f "$INSTALLED_SHA_FILE" ] && cat "$INSTALLED_SHA_FILE" || echo ""; }
+installed_ref() { [ -f "$INSTALLED_REF_FILE" ] && cat "$INSTALLED_REF_FILE" || echo ""; }
+failed_ref()    { [ -f "$FAILED_REF_FILE" ] && cat "$FAILED_REF_FILE" || echo ""; }
+
+valid_ref() { printf '%s' "$1" | grep -Eq "$REF_RE"; }
+
+# ── Qué release toca (D-021) ─────────────────────────────────────────────────
+# Imprime el tag asignado, "HOLD" si la unidad está retenida, o nada si no hay
+# asignación. Orden: --ref (ya en TARGET_REF) › .assigned_release › backend.
+assigned_from_file() {
+    [ -f "$ASSIGNED_FILE" ] || return 1
+    local rel hold
+    read -r rel hold < "$ASSIGNED_FILE" || return 1
+    [ "${hold:-0}" = 1 ] && { echo HOLD; return 0; }
+    [ -n "$rel" ] && [ "$rel" != "-" ] && { echo "$rel"; return 0; }
+    echo ""; return 0
+}
+
+assigned_from_backend() {
+    # Misma derivación que oceankind/config.py y el backend (§Provisioning
+    # secret): auth_key = HMAC-SHA256(secret, "oceankind:auth:v1"). La firma del
+    # documento no se verifica aquí (eso lo hace el servicio en Python); este
+    # valor sólo elige un tag que ya existe en el repositorio que la unidad ya
+    # confía, y pasa por REF_RE antes de tocar git.
+    [ -r "$ENV_FILE" ] || return 1
+    local url secret id key doc
+    url=$(sed -n 's/^[[:space:]]*OCEANKIND_BACKEND_URL=//p' "$ENV_FILE" | tail -1 | tr -d '"'"'"' ')
+    secret=$(sed -n 's/^[[:space:]]*OCEANKIND_DEVICE_SECRET=//p' "$ENV_FILE" | tail -1 | tr -d '"'"'"' ')
+    id=$(sed -n 's/^[[:space:]]*OCEANKIND_DEVICE_ID=//p' "$ENV_FILE" | tail -1 | tr -d '"'"'"' ')
+    [ -n "$url" ] && [ -n "$secret" ] && [ -n "$id" ] || return 1
+    command -v openssl >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 || return 1
+    key=$(printf 'oceankind:auth:v1' | openssl dgst -sha256 -hmac "$secret" 2>/dev/null | awk '{print $NF}')
+    [ -n "$key" ] || return 1
+    doc=$(tmo 30 curl -fsS --max-time 20 -H "X-Device-Id: $id" -H "X-Device-Key: $key" \
+          -H "User-Agent: oceankind-ota" "${url%/}/api/devices/config" 2>/dev/null) || return 1
+    printf '%s' "$doc" | python3 -c '
+import json, sys
+try:
+    c = json.load(sys.stdin).get("config") or {}
+except Exception:
+    sys.exit(1)
+print("HOLD" if c.get("hold") else (c.get("release") or ""))
+' 2>/dev/null
+}
+
+resolve_target() {
+    # Deja TARGET_REF fijado, o devuelve: 0 = nada que hacer (sin asignación /
+    # retenida), 1 = objetivo listo, 2 = no se pudo resolver.
+    local src="argumento" rel
+    if [ -z "$TARGET_REF" ]; then
+        if rel=$(assigned_from_file); then
+            src=".assigned_release"
+        elif rel=$(assigned_from_backend); then
+            src="backend"
+        else
+            log "Sin asignación conocida (ni $ASSIGNED_FILE ni respuesta del backend)."
+            log "Nada que hacer: el OTA sólo converge a una release asignada desde el panel (D-021)."
+            return 0
+        fi
+        if [ "$rel" = HOLD ]; then
+            log "Unidad RETENIDA desde el panel (hold) — no se actualiza."
+            return 0
+        fi
+        if [ -z "$rel" ]; then
+            log "Sin release asignada ($src) — la unidad conserva lo que corre."
+            return 0
+        fi
+        TARGET_REF="$rel"
+    fi
+    if ! valid_ref "$TARGET_REF"; then
+        log "ERROR: '$TARGET_REF' ($src) no tiene forma de tag — se ignora."
+        return 2
+    fi
+    log "Release objetivo: $TARGET_REF ($src)"
+    return 1
+}
+
+check_env_generation() {
+    # D-020: la variable vieja sin el secreto nuevo hace que la unidad se niegue
+    # a arrancar en cualquier release con D-020. Decirlo ANTES de desplegar,
+    # aunque el rollback lo cubra: un rollback es un reinicio que nadie pidió.
+    [ -r "$ENV_FILE" ] || return 0
+    if grep -qE '^[[:space:]]*OCEANKIND_DEVICE_KEY=.+' "$ENV_FILE" \
+       && ! grep -qE '^[[:space:]]*OCEANKIND_DEVICE_SECRET=.+' "$ENV_FILE"; then
+        log "AVISO: $ENV_FILE tiene OCEANKIND_DEVICE_KEY (anterior a D-020) y no OCEANKIND_DEVICE_SECRET."
+        log "       Una release con D-020 se negará a arrancar y se revertirá. Re-crear el"
+        log "       dispositivo en el panel y pegar el secreto nuevo antes de asignarla."
+    fi
+    return 0
+}
 
 # ── Journal ──────────────────────────────────────────────────────────────────
 journal_write() { atomic_write "$JOURNAL" "state=$1 prev=$2 target=$3"; }   # sin espacios en los valores
@@ -338,8 +458,18 @@ install_files() {
 # cierra el journal; un corte entre ambos sólo repite una confirmación idempotente.
 commit() {
     atomic_write "$INSTALLED_SHA_FILE" "$1" || return 1
-    rm -f "$FAILED_SHA_FILE"
+    # El ref del que vino (D-021): es lo que el servicio compara con la
+    # asignación. Mejor esfuerzo: sin él, el servicio compara SHAs… que no
+    # conoce, y relanzaría; por eso se escribe aquí, no en el servicio.
+    [ -n "$TARGET_REF" ] && atomic_write "$INSTALLED_REF_FILE" "$TARGET_REF"
+    rm -f "$FAILED_SHA_FILE" "$FAILED_REF_FILE"
     journal_clear
+    return 0
+}
+
+mark_failed() {   # $1 sha
+    atomic_write "$FAILED_SHA_FILE" "$1"
+    [ -n "$TARGET_REF" ] && atomic_write "$FAILED_REF_FILE" "$TARGET_REF"
     return 0
 }
 
@@ -419,7 +549,7 @@ recover_journal() {
                 return 0
             fi
             log "✗ $target no verifica — revirtiendo a $prev"
-            atomic_write "$FAILED_SHA_FILE" "$target"
+            mark_failed "$target"
             ;;
         *)
             # installing / rollingback / ilegible: el árbol puede estar a medias.
@@ -441,36 +571,60 @@ recover_journal() {
 }
 
 # ── El update completo. Usado por el modo directo y por el mantenimiento ─────
+# Resuelve el SHA corto del ref objetivo en el checkout (tras fetch). Tag
+# primero (anotado o ligero), luego un commit/sha suelto. Imprime el sha.
+resolve_sha() {
+    local sha
+    sha=$(git -C "$REPO_DIR" rev-parse --short "refs/tags/$TARGET_REF^{commit}" 2>/dev/null) \
+        || sha=$(git -C "$REPO_DIR" rev-parse --short "$TARGET_REF^{commit}" 2>/dev/null) \
+        || return 1
+    echo "$sha"
+}
+
 do_update() {
+    local rc
+    resolve_target; rc=$?
+    [ "$rc" = 0 ] && return 0
+    [ "$rc" = 2 ] && return 2
+    check_env_generation
     ensure_repo || return 2
 
-    local current target previous rc
+    local current target previous
     current=$(installed_sha)
-    log "Versión instalada: ${current:-desconocida (provisionada fuera de la OTA)}"
+    log "Versión instalada: ${current:-desconocida (provisionada por setup.sh)}${current:+ ($(installed_ref))}"
 
     fetch_target || return 2
-    target=$(git -C "$REPO_DIR" rev-parse --short "origin/$REPO_BRANCH")
+    if ! target=$(resolve_sha); then
+        log "ERROR: la release '$TARGET_REF' no existe en $REPO_URL (¿tag sin publicar, o typo en el panel?)."
+        log "       La instalación no cambió. Se reintenta en la próxima ejecución."
+        return 2
+    fi
 
     if [ -n "$current" ] && [ "$current" = "$target" ]; then
-        log "Ya en la versión más reciente ($current) — sin cambios."
+        if [ "$(installed_ref)" != "$TARGET_REF" ]; then
+            # Mismo commit, otro nombre (p.ej. tag puesto sobre lo ya instalado):
+            # registrar el nombre para que el servicio deje de pedirlo.
+            atomic_write "$INSTALLED_REF_FILE" "$TARGET_REF"
+        fi
+        log "Ya en la release asignada ($TARGET_REF = $current) — sin cambios."
         return 0
     fi
 
     # Un commit que ya rompió esta unidad no se reintenta solo.
     if [ -f "$FAILED_SHA_FILE" ] && [ "$(cat "$FAILED_SHA_FILE")" = "$target" ]; then
-        log "El commit $target ya falló en esta unidad y se revirtió."
-        log "NO se reintenta automáticamente. Corrige el commit, o borra"
+        log "El commit $target ($TARGET_REF) ya falló en esta unidad y se revirtió."
+        log "NO se reintenta automáticamente. Publica otra release, o borra"
         log "$FAILED_SHA_FILE a mano para forzar otro intento."
         return 0
     fi
 
     previous="${current:-$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo desconocida)}"
-    log "Nueva versión disponible: ${current:-?} → $target"
+    log "Release asignada: ${current:-?} → $target ($TARGET_REF)"
 
     deploy "$target" "$previous"; rc=$?
     case "$rc" in
         0)
-            log "✓ Actualización completada y verificada: $previous → $target"
+            log "✓ Actualización completada y verificada: $previous → $target ($TARGET_REF)"
             return 0 ;;
         2)
             log "✗ Actualización NO aplicada por un fallo de infraestructura (no del commit)."
@@ -479,8 +633,8 @@ do_update() {
     esac
 
     # ── El build es malo ─────────────────────────────────────────────────────
-    log "✗ $target falló la verificación — revirtiendo a $previous"
-    atomic_write "$FAILED_SHA_FILE" "$target"
+    log "✗ $target ($TARGET_REF) falló la verificación — revirtiendo a $previous"
+    mark_failed "$target"
 
     if [ ! -f "$JOURNAL" ]; then
         log "  El commit era inválido antes de instalarse: la instalación sigue intacta."
@@ -516,24 +670,32 @@ ota_phase1() {
         return 0
     fi
 
+    local rc
+    resolve_target; rc=$?
+    [ "$rc" = 0 ] && return 0
+    [ "$rc" = 2 ] && return 2
     ensure_repo || return 2       # (a RAM: se pierde al reiniciar, sólo sirve para decidir)
     fetch_target || return 2
 
     local current target
     current=$(installed_sha)
-    target=$(git -C "$REPO_DIR" rev-parse --short "origin/$REPO_BRANCH")
+    if ! target=$(resolve_sha); then
+        log "ERROR: la release '$TARGET_REF' no existe en el remoto. Sin cambios."
+        return 2
+    fi
     if [ -n "$current" ] && [ "$current" = "$target" ]; then
-        log "Ya en la versión más reciente ($current) — sin cambios."
+        log "Ya en la release asignada ($TARGET_REF = $current) — sin cambios."
         return 0
     fi
     if [ -f "$FAILED_SHA_FILE" ] && [ "$(cat "$FAILED_SHA_FILE")" = "$target" ]; then
-        log "El commit $target ya falló en esta unidad y se revirtió."
-        log "NO se reintenta. Borra $FAILED_SHA_FILE para forzar otro intento."
+        log "El commit $target ($TARGET_REF) ya falló en esta unidad y se revirtió."
+        log "NO se reintenta. Publica otra release, o borra $FAILED_SHA_FILE para forzar otro intento."
         return 0
     fi
 
-    log "Nueva versión disponible: ${current:-?} → $target"
+    log "Release asignada: ${current:-?} → $target ($TARGET_REF)"
     log "Overlay activo — entrando en modo mantenimiento (overlay OFF + reinicio)."
+    log "(La asignación se vuelve a pedir al backend en la ventana: el fichero local no sobrevive al reinicio.)"
     if ! sudo raspi-config nonint do_overlayfs 1; then
         log "ERROR: no se pudo desactivar el overlay. Sin cambios."
         return 1
@@ -588,15 +750,21 @@ finish_maintenance() {
 }
 
 # ── Punto de entrada ─────────────────────────────────────────────────────────
-MODE=cron
+MODE=timer
 case "${1:-}" in
     --boot) MODE=boot ;;
+    --ref)
+        MODE=assigned
+        TARGET_REF="${2:-}"
+        if [ -z "$TARGET_REF" ] || ! valid_ref "$TARGET_REF"; then
+            echo "uso: $0 --ref <tag>   (tag git, p.ej. v2.2.0)"; exit 64
+        fi ;;
     "")     ;;
-    *)      echo "uso: $0 [--boot]"; exit 64 ;;
+    *)      echo "uso: $0 [--boot | --ref <tag>]"; exit 64 ;;
 esac
 
 echo ""
-log "=== OceanKind OTA Update ($MODE) ==="
+log "=== OceanKind OTA Update ($MODE${TARGET_REF:+ → $TARGET_REF}) ==="
 
 acquire_lock || exit 0
 trap release_lock EXIT

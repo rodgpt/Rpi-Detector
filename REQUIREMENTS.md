@@ -115,7 +115,7 @@ We build the harness. We do not build detectors or choose thresholds.
 
 *Test:* fill the queue past its bound; the oldest are dropped, the count is published, memory holds.
 
-**R-5.5 MUST** set an explicit timeout on every network call. The Twilio client currently has none, and an untimed call on the capture thread is an unbounded deaf window.
+**R-5.5 MUST** set an explicit timeout on every network call. An untimed call on the capture thread is an unbounded deaf window. *(The Twilio client this requirement was written against had none; since D-020 the device makes no Twilio call at all — the remaining calls are the backend push/heartbeat/config fetch at 10 s, Azure, the modem at 3 s and VE.Direct serial at 1 s.)*
 
 **R-5.6 MUST** produce output that passes `tools/validate_contract.py` with no errors.
 

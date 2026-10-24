@@ -25,7 +25,6 @@ REPO = Path(__file__).resolve().parent.parent.parent
 OUT = Path(tempfile.mkdtemp(prefix="ok_reg_out_"))
 
 os.environ.update({
-    "OCEANKIND_ALLOW_NO_TWILIO": "1",
     "OCEANKIND_OUTPUT_DIR": str(OUT),
     "OCEANKIND_SITE": "banco",
     "OCEANKIND_DEVICE_ID": "Rpi_bench",
@@ -95,7 +94,7 @@ check("both fire on loud tonal, registry order kept",
       [d["detector"] for d in dets] == ["psd_tonal", "rms"]
       and [d["type"] for d in dets] == ["vessel", "unknown"])
 
-pipe = pipeline.Pipeline(iot_client=None)
+pipe = pipeline.Pipeline()
 pipe._process_clip(tonal)
 jobs = []
 while not pipe.transport_queue.empty():

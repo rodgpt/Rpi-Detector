@@ -24,7 +24,6 @@ STATE = Path(tempfile.mkdtemp(prefix="oceankind_state_"))
 CSVLOG = STATE / "data_log.csv"
 
 os.environ.update({
-    "OCEANKIND_ALLOW_NO_TWILIO": "1",
     "OCEANKIND_OUTPUT_DIR": str(OUT),
     "OCEANKIND_SITE": "punta_norte",
     "OCEANKIND_DEVICE_ID": "Rpi_punta_norte",
@@ -102,7 +101,10 @@ health.record_clip()
 status, _sensors = main.collect_status(now - timedelta(hours=2), 2, 0.0142)
 main.write_status_blob(status, 2, 0.0142)
 assert status["health"]["degraded_reason"] is None, status["health"]["degraded_reason"]
-assert status["health"]["capture_ok"] is True and status["health"]["alerts_enabled"] is False
+assert status["health"]["capture_ok"] is True
+assert "alerts_enabled" not in status["health"] and "wa_pending" not in status["health"]   # D-020
+assert set(status["ota"]) == {"installed_sha", "installed_release", "failed_sha", "failed_release",
+                              "assigned_release", "hold", "in_progress"}            # D-021
 
 # ── power_history.json from a synthetic telemetry CSV ────────────────────────
 CSVLOG.unlink(missing_ok=True)   # write_status_blob appended a live row; test wants a known set

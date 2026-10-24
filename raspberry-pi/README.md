@@ -11,21 +11,22 @@ The name says Raspberry Pi because that is what is deployed: a Pi 4 Model B in t
 ```
 raspberry-pi/
 ├── src/
-│   ├── oceankind/               THE production system. Ten modules, ~2,400 lines
+│   ├── oceankind/               THE production system. Ten modules, ~2,300 lines
 │   │   ├── main.py              entrypoint, housekeeping thread
 │   │   ├── capture.py           audio thread, bounded queues, never blocks
-│   │   ├── pipeline.py          classify → decide → record → notify
+│   │   ├── pipeline.py          classify → decide → record → push (the backend notifies, D-020)
 │   │   ├── detector.py          PSD tonal + RMS decision (harness, not science)
 │   │   ├── storage.py           v2 blob layout, spool + retry, local mode
+│   │   ├── push.py              event push, heartbeat, config fetch — one derived key
 │   │   ├── telemetry.py         VE.Direct, modem, power history
-│   │   ├── notify.py            WhatsApp, voice calls, IoT Hub heartbeat
+│   │   ├── ota.py               converge to the release assigned from the panel (D-021)
 │   │   ├── health.py            the fail-loud surface in status.json
-│   │   └── config.py            env + signed remote config verification
+│   │   └── config.py            env, one secret → two keys, signed remote config verification
 │   ├── marfutura_iot_audio.py   thin launcher; kept so the systemd unit never changes
 │   └── detector_psd.py          reference copy of the PSD algorithm
 ├── models/model.joblib          unused today; returns as a registry detector (Phase 3)
-├── scripts/                     setup.sh (fixed, F-11), protect_sd.sh, update_oceankind.sh (no rollback — Phase 5)
-├── tools/                       workstation-only: v2_conformance_test.py, phase1_smoke_test.py, predict.py
+├── scripts/                     setup.sh (fixed, F-11), protect_sd.sh, update_oceankind.sh (journaled, rolls back, converges to the assigned release)
+├── tools/                       workstation-only: `make test` (smoke, conformance, soak), push_test.py, ota_rollback_test.sh, ota_fault_test.sh, predict.py
 ├── requirements.txt             real dependencies of the package (F-11 fixed)
 └── docs/                        ARCHITECTURE, HARDWARE, PROGRESS, TODO, BENCH, OTA-FAULT-TESTING
 ```

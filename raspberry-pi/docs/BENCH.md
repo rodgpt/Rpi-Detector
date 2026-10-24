@@ -240,26 +240,15 @@ entirely on your account state:
 Whichever you choose, **write it down in the results** — a duty cycle from an
 impulse run is not comparable to one from a tone run.
 
-**Pre-flight: blank the Twilio secrets before you copy anything.**
-
-Step 2 rsyncs `raspberry-pi/oceankind.env` onto the Pi, and step 3 installs it
-to `/etc/oceankind.env`. That file carries the **unrotated** Twilio token (F-04),
-which already exists in `legacy/build-artifacts/` twice and on a git remote.
-Copying it puts the same live credential on a third artefact — an SD card that
-gets handled casually.
-
-The bench sets `OCEANKIND_ALLOW_NO_TWILIO=1` anyway (§4), so it never needs
-them. On the **Mac**, before step 2, blank these two lines in
-`raspberry-pi/oceankind.env`:
-
-```
-OCEANKIND_TWILIO_SID=
-OCEANKIND_TWILIO_TOKEN=
-```
-
-Put them back when the token is rotated. Setting `TWILIO_TO` to your own number
-protects the production recipients but does **not** remove the token from the
-card — those are different risks and only blanking solves the second.
+**Pre-flight (historical, resolved 2026-10-24).** This section used to say: blank
+the Twilio secrets in `raspberry-pi/oceankind.env` before copying it, because the
+file carried the unrotated token (F-04). Two things made that moot the same day:
+the token was rotated, and D-020 removed Twilio from the device entirely — the
+unit holds one secret (`OCEANKIND_DEVICE_SECRET`) and no phone number, and
+`setup.sh` no longer installs the live env file unless asked (`--live-env`). A
+bench unit therefore cannot message anyone, by construction, and there is
+nothing to blank. Any `OCEANKIND_TWILIO_*`/`ALLOW_NO_TWILIO`/`BENCH` lines still
+in an old env file are ignored.
 
 **What else is unset in that file, and whether it matters**
 
@@ -268,7 +257,7 @@ card — those are different risks and only blanking solves the second.
 | `OCEANKIND_SITE` | empty | Set to `banco` in §4. Empty is fine until storage is on — `config.py` (validate_startup_config) only demands it then |
 | `OCEANKIND_OUTPUT_DIR` | commented out | **Must be set** in §4, or the device writes nothing at all |
 | `OCEANKIND_AUDIO_SOURCE` | commented out | Defaults to `device`. No hydrophone here, so §4's `synthetic:tone` is required |
-| `OCEANKIND_CONFIG_HMAC_KEY` | empty | **Correct as-is.** No key means remote config is refused entirely (F-10, by design). `main.py` (the config poller) catches it, records a health event, and does not crash |
+| `OCEANKIND_DEVICE_SECRET` | empty | Fine for a storage-only soak: with no backend URL the unit never polls configuration. Set it (from Admin → Dispositivos) together with `OCEANKIND_BACKEND_URL` for §9 — the same secret derives the auth key and the config-verification key (D-020), so remote tuning works the moment the unit connects |
 | `OCEANKIND_STORAGE_CONNECTION_STRING` | empty | Leave empty for the 24 h soak. §8 fills it for the short second run |
 
 Set all of these on the Pi in `/etc/oceankind.env` (§4), not in the repo copy —
@@ -360,14 +349,12 @@ OCEANKIND_SENSOR_LOCATION=Banco ZeroW
 OCEANKIND_SENSOR_LAT=-33.0
 OCEANKIND_SENSOR_LON=-71.0
 
-# ── Notifications OFF ─────────────────────────────────────────────────────
-# CRITICAL: the shipped env carries PRODUCTION recipients. A 24 h synthetic
-# soak fires on every window and must not message them. Either allow-no-twilio
-# (preferred — the bench does not need Twilio at all) or point TWILIO_TO at
-# your OWN number. The SID/TOKEN should already be blank from §0.
-OCEANKIND_ALLOW_NO_TWILIO=1
-OCEANKIND_TWILIO_SID=
-OCEANKIND_TWILIO_TOKEN=
+# ── Notifications: none from the device, ever (D-020) ─────────────────────
+# A 24 h synthetic soak fires on every window. Nothing here can message anyone:
+# the unit has no Twilio. If OCEANKIND_BACKEND_URL is set, each detection is
+# pushed to the backend, which WILL send WhatsApps if ITS Twilio is configured —
+# so for a soak either leave the backend URL unset, or use a backend whose
+# .env has no OCEANKIND_TWILIO_* (log-only), or point ALERT_TO there at yourself.
 
 # ── Where the v2 tree goes — pick ONE ─────────────────────────────────────
 # (a) LOCAL — the CURRENT bench setup (2026-09-07). Identical tree on the SD
@@ -493,7 +480,7 @@ two headers and the event document:
 ```
 POST /api/devices/events
 X-Device-Id:  Rpi_bench          ← literally your OCEANKIND_DEVICE_ID
-X-Device-Key: <the issued key>   ← literally your OCEANKIND_DEVICE_KEY
+X-Device-Key: <derived auth key>  ← HMAC-SHA256(OCEANKIND_DEVICE_SECRET, "oceankind:auth:v1"), never the secret itself (D-020)
 Content-Type: application/json
 ```
 
@@ -543,11 +530,12 @@ Equivalent by API, if you prefer: `POST /api/admin/devices` with
 
 ```bash
 OCEANKIND_BACKEND_URL=https://marfutura.buenalynch.com
-OCEANKIND_DEVICE_KEY=<the key you just copied>
+OCEANKIND_DEVICE_SECRET=<the secret you just copied>
 ```
 
 **Base URL only** — the device appends `/api/devices/events` itself. A URL with
-no key refuses to start (R-8.1); that is deliberate, not a bug.
+no secret refuses to start (R-8.1); that is deliberate, not a bug. So does a
+leftover `OCEANKIND_DEVICE_KEY` line from before 2026-10-24 — delete it.
 
 ```bash
 sudo systemctl restart oceankind
@@ -601,8 +589,9 @@ retry forever while logging only *"backend inalcanzable"*.
 | Code | Means | Where to fix it |
 |---|---|---|
 | `202` | Indexed, or already was. Re-posting the same `event_id` is also `202` | — |
-| `422` | Headers missing entirely | `OCEANKIND_DEVICE_KEY` unset in the env file |
-| `401` | Id/key pair does not match an **active** device record | Re-check the key, or re-issue the device |
+| `422` | Headers missing entirely | `OCEANKIND_DEVICE_SECRET` unset in the env file |
+| `401` | Id/key pair does not match an **active** device record | Re-check the secret, or re-create the device. Pasting the secret itself as the header (instead of the derived key) is also `401` |
+| `409` | Device created before D-020: no signing key | Only on `GET /api/devices/config`. Delete and re-create the device in the panel, paste the new secret |
 | `403` | Two different causes — see below | Read the log line, don't assume |
 | `400` | Malformed document, or naive `captured_utc` | A device-side bug — report it |
 | `5xx`/timeout | Backend down or deploying | Nothing. It spools and drains on the next heartbeat |
@@ -851,6 +840,7 @@ proves `publish_site_registry()` worked.
   A watchdog restart during the soak is a FINDING — record it, keep the journal.
 - **You rebooted mid-soak** — duty cycle and counters are per-session; the
   24 h clock restarts. (The output tree survives — it is on the SD, not tmpfs.)
-- **Remote config never applies** — expected. `OCEANKIND_CONFIG_HMAC_KEY` is
-  empty, and without it the device refuses all remote config (F-10). It is
-  recorded in `health.degraded_reason`, not silently ignored.
+- **Remote config never applies** — expected on a storage-only soak with no
+  `OCEANKIND_BACKEND_URL`: there is nothing to poll. With a backend URL and
+  secret set it applies within 300 s; a rejection is recorded in
+  `health.degraded_reason`, never silently ignored (F-10).

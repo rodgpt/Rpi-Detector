@@ -3,9 +3,10 @@
 Modelo de proceso (Fase 2):
   captura       stream continuo → cola de bloques. Jamás bloquea (R-1.1).
   clasificador  ventanas de 5 s, detector sobre cada una, decide.
-  transporte    subidas + notificaciones. Toda la red.
-  housekeeping  (hilo principal) status.json, telemetría, batería, config
-                remota, reintentos, heartbeats. Todo con timers propios (R-6.1).
+  transporte    subidas + push al backend. Toda la red. El backend avisa (D-020).
+  housekeeping  (hilo principal) status.json, telemetría, config remota,
+                disparador OTA (D-021), reintentos, heartbeats. Todo con
+                timers propios (R-6.1).
 
 Apagado: SIGTERM/SIGINT → los hilos se cierran y los trabajos de transporte
 pendientes se preservan en el spool. systemd reinicia; el spool drena al volver.
@@ -22,7 +23,7 @@ from . import capture
 from . import config as C
 from . import health
 from . import detectors as registry
-from . import notify
+from . import ota
 from . import pipeline as pl
 from . import push
 from . import storage
@@ -54,6 +55,7 @@ def build_status(session_start: datetime, alert_count: int, last_rms: float,
         "uptime_seconds":   int((now - session_start).total_seconds()),
         "system_uptime_s":  stats.get("system_uptime_s"),
         "health":           health.build_health(),
+        "ota":              ota.status_block(),      # D-021: qué corre vs qué se asignó
         "detection": {
             "mode":       cfg["detection_mode"],
             "detectors":  detectors,
@@ -110,13 +112,12 @@ def collect_status(session_start: datetime, alert_count: int, last_rms: float) -
     heartbeat (D-018: antes esto vivía dentro de `upload_status`, que solo se
     llamaba con almacenamiento activo — el POST al backend §Device heartbeat
     no depende de eso y necesita los mismos datos, así que la recolección se
-    separó de la subida). El resultado se reusa para el POST, el blob (si hay
-    almacenamiento) y el heartbeat de WhatsApp — nunca se recolecta dos veces
-    en el mismo tick."""
+    separó de la subida). El resultado se reusa para el POST y el blob (si hay
+    almacenamiento) — nunca se recolecta dos veces en el mismo tick. La alerta
+    de batería la decide el backend a partir de power.battery_voltage_v (D-020)."""
     solar = telemetry.fetch_ve_direct()
     modem = telemetry.fetch_modem_signal()
     stats = telemetry.get_system_stats()
-    telemetry.check_battery_alert(solar)
     status = build_status(session_start, alert_count, last_rms, solar, modem, stats)
     return status, {"solar": solar, "modem": modem, "stats": stats}
 
@@ -148,22 +149,27 @@ def main() -> None:
              cfg["psd_threshold_db"], cfg["psd_f_min"], cfg["psd_f_max"], cfg["cooldown_s"])
     if not C.STORAGE_ENABLED:
         log.warning("Sin almacenamiento configurado (ni Azure ni OUTPUT_DIR) — "
-                    "eventos solo en log, WhatsApp y push al backend; la config remota "
+                    "eventos solo en log y push al backend; la config remota "
                     "se consulta vía GET /api/devices/config")
-    if C.BENCH:
-        log.warning("⚠️  OCEANKIND_BENCH=1 — unidad declarada como banco de pruebas")
     if push.enabled():
-        log.info("Push de eventos al backend: ACTIVO → %s (timeout %.0fs)",
+        log.info("Push de eventos y heartbeat al backend: ACTIVO → %s (timeout %.0fs). "
+                 "Las alertas a humanos las manda el backend (D-020).",
                  C.BACKEND_URL, C.BACKEND_TIMEOUT_S)
     else:
         log.info("Push de eventos al backend: deshabilitado (sin OCEANKIND_BACKEND_URL) — "
                  "el índice del dashboard se actualiza solo por reconciliación")
+    o = ota.status_block()
+    log.info("OTA: instalada %s (%s) | asignada %s%s%s",
+             o["installed_release"] or "?", o["installed_sha"] or "sin registro",
+             o["assigned_release"] or "ninguna",
+             " | RETENIDA" if o["hold"] else "",
+             f" | falló {o['failed_release'] or o['failed_sha']}" if o["failed_sha"] else "")
 
     if C.STORAGE_ENABLED:
         storage.publish_site_registry()
         storage.ensure_aux_blobs()
 
-    pipe = pl.Pipeline(None)
+    pipe = pl.Pipeline()
     source = capture.make_source(pipe.block_queue)
 
     stop = threading.Event()
@@ -175,18 +181,14 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _sig)
     signal.signal(signal.SIGINT, _sig)
 
-    # La captura arranca ANTES de cualquier red: IoT Hub (connect sin timeout
-    # en el SDK) y los reintentos de WhatsApp iban antes y, con el hub o Twilio
-    # colgados, la unidad reiniciaba por watchdog sin haber escuchado un segundo.
+    # La captura arranca ANTES de cualquier red (F-33): nada de lo que sigue
+    # puede dejar a la unidad sin escuchar un segundo.
     pipe.start()
     source.start()
     watchdog.arm()
-    iot = notify.build_iot_client()
-    pipe.iot_client = iot
-    notify.retry_pending_whatsapp(budget_s=C.HOUSEKEEPING_BUDGET_S, keepalive=watchdog.tick)
 
     session_start = datetime.now(timezone.utc)
-    last_status = last_power = last_config = last_wa_hb = 0.0
+    last_status = last_power = last_config = 0.0
     applied_config_version = None
     rejected_config_version = None
 
@@ -235,31 +237,11 @@ def main() -> None:
                             write_status_blob(status, pipe.alert_count, pipe.last_rms)
                         except Exception as exc:
                             log.warning("  Error subiendo status.json: %s", exc)
-                if iot:
-                    try:
-                        notify.send_iot_message(iot, pipe.last_rms, pipe.last_peak_db,
-                                                msg_type="heartbeat",
-                                                threshold=C.CONFIG.snapshot()["alert_threshold"])
-                    except Exception as exc:
-                        log.warning("  Error en heartbeat IoT Hub: %s", exc)
                 last_status = now
 
                 if C.STORAGE_ENABLED and now - last_power >= 600:
                     telemetry.upload_power_history()
                     last_power = now
-
-                if now - last_wa_hb >= C.WHATSAPP_HEARTBEAT_INTERVAL:
-                    s = sensors or {"solar": telemetry.fetch_ve_direct(),
-                                    "modem": telemetry.fetch_modem_signal(),
-                                    "stats": telemetry.get_system_stats()}
-                    notify.send_whatsapp_heartbeat(
-                        session_start, pipe.alert_count, pipe.last_rms,
-                        s["stats"], s["modem"], s["solar"],
-                        telemetry.compute_system_load(s["solar"]),
-                        health.audio_status_str())
-                    notify.retry_pending_whatsapp(budget_s=C.HOUSEKEEPING_BUDGET_S,
-                                                  keepalive=watchdog.tick)
-                    last_wa_hb = now
 
             if now - last_config >= C.CONFIG_CHECK_INTERVAL and (C.STORAGE_ENABLED or push.enabled()):
                 # Todo el ciclo bajo try: un documento firmado pero malformado
@@ -297,10 +279,26 @@ def main() -> None:
                                 log.info("⚙️  Config remota %r aplicada: %s",
                                          applied_config_version,
                                          "; ".join(changes) if changes else "sin cambios efectivos")
+                                # D-021: la asignación de release viaja en el
+                                # mismo documento firmado. Se recuerda SIEMPRE
+                                # que verifica (también si no cambió nada más).
+                                ota.record_assignment(values.get("release"),
+                                                      bool(values.get("hold", False)))
                 except Exception as exc:    # noqa: BLE001
                     health.set_config_error(f"error procesando config remota: {exc}")
                     log.error("⚙️  Config remota: error inesperado (%s) — se mantiene la última "
                               "config válida", exc)
+                # Converger a la release asignada (D-021). Fuera del try de
+                # arriba a propósito: una config inalcanzable no impide actuar
+                # sobre la última asignación verificada, y un fallo al lanzar
+                # el OTA no puede contaminar el estado de la config.
+                try:
+                    decision = ota.maybe_trigger()
+                    if decision not in ("none", "current", "hold", "cooldown", "launched"):
+                        log.warning("OTA: asignada %s pero no se lanza (%s)",
+                                    ota.status_block()["assigned_release"], decision)
+                except Exception as exc:    # noqa: BLE001
+                    log.error("OTA: error inesperado en el disparador (%s)", exc)
                 last_config = now
 
             health.flush_degraded_alerts()   # avisos encolados por otros hilos (clasificador)
@@ -309,12 +307,6 @@ def main() -> None:
     finally:
         source.stop()
         pipe.stop()
-        if iot:
-            try:
-                iot.disconnect()
-                log.info("Desconectado de IoT Hub.")
-            except Exception:
-                pass
         log.info("Apagado limpio. Hasta la próxima.")
 
 

@@ -27,7 +27,6 @@ OUT = Path(tempfile.mkdtemp(prefix="oceankind_soak_"))
 STATE = Path(tempfile.mkdtemp(prefix="oceankind_state_"))
 
 os.environ.update({
-    "OCEANKIND_ALLOW_NO_TWILIO": "1",
     "OCEANKIND_OUTPUT_DIR": str(OUT),
     "OCEANKIND_SITE": "banco",
     "OCEANKIND_DEVICE_ID": "Rpi_banco",
@@ -65,7 +64,7 @@ def _slow_upload_json(rel, data):
     return _real_upload_json(rel, data)
 storage.upload_json = _slow_upload_json
 
-pipe = pl.Pipeline(iot_client=None)
+pipe = pl.Pipeline()
 source = capture.SyntheticSource(pipe.block_queue, pattern="tone", time_scale=10.0)
 
 pipe.start()

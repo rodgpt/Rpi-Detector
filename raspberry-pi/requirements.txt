@@ -4,7 +4,10 @@
 # librosa, scikit-learn and joblib — do NOT install those on the device;
 # they are workstation-only and heavy for a 512 MB bench unit.
 #
-# zoneinfo, wave, csv, urllib are stdlib.
+# zoneinfo, wave, csv, urllib, hmac are stdlib.
+#
+# No twilio, no azure-iot-device since D-020 (2026-10-24): the device sends no
+# alert to anyone; the backend does, with the one Twilio credential.
 #
 # OPTIONAL — only on units that enable the ml_mfcc detector (OCEANKIND_DETECTORS):
 #   librosa scikit-learn~=1.6 joblib
@@ -15,6 +18,4 @@ numpy>=1.24
 scipy>=1.10           # Welch PSD + find_peaks (detector psd_tonal)
 sounddevice>=0.4.6    # continuous capture (PortAudio); needs apt libportaudio2
 azure-storage-blob>=12.19
-azure-iot-device>=2.12
-twilio>=8.0
 pyserial>=3.5         # Victron VE.Direct telemetry

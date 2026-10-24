@@ -2,7 +2,7 @@
 
 Blank Raspberry Pi → measuring and reporting to the dashboard. About 1 hour, mostly waiting on the install.
 
-**You need:** a Pi (Zero 2 W / 3 / 4), power supply, 16 GB+ SD card, Wi-Fi or Ethernet with internet (Pi Zero: **2.4 GHz only**), an admin login to the dashboard, and a Raspberry Pi Codec Zero HAT with the hydrophone circuit wired to it (skip both for a test unit — see step 5). Codec Zero is detected automatically in step 6, no config needed — confirmed working end to end, including a cold reboot, on `6.18.50+rpt-rpi-v8` (current default Raspberry Pi OS Lite) as of 2026-10-24.
+**You need:** a Pi (Zero 2 W / 3 / 4), power supply, 16 GB+ SD card, Wi-Fi or Ethernet with internet (Pi Zero: **2.4 GHz only**), an admin login to the dashboard (which is also where alerts are configured — the unit itself holds no Twilio anything, D-020), and a Raspberry Pi Codec Zero HAT with the hydrophone circuit wired to it (skip both for a test unit — see step 5). Codec Zero is detected automatically in step 6, no config needed — confirmed working end to end, including a cold reboot, on `6.18.50+rpt-rpi-v8` (current default Raspberry Pi OS Lite) as of 2026-10-24.
 
 ---
 
@@ -27,7 +27,8 @@ Log in as admin at **https://marfutura.buenalynch.com**.
 2. **Admin → Dispositivos → Crear:**
    - `device_id`: unique, 3–64 chars, letters/digits/`_`/`-` (e.g. `Rpi_zapallar`)
    - `site_id`: the site from above
-3. Copy the **Clave** (key) immediately. It is shown **once** and cannot be recovered. If lost, delete the device and recreate it.
+3. Copy the **Secreto** immediately. It is shown **once** and cannot be recovered. If lost, delete the device and recreate it. It is the only credential the unit will ever hold: from it the unit derives its login key and the key that verifies its configuration (D-020).
+4. Optional: under **Versiones** on the same page, set the *predeterminada* release (a git tag such as `v2.2.0`). A device created while one is set is assigned it at birth, so it updates itself to that version on first contact (D-021).
 
 ## 3. Get the code onto the Pi
 
@@ -64,21 +65,14 @@ OCEANKIND_SENSOR_LOCATION=name
 OCEANKIND_SENSOR_LAT=
 OCEANKIND_SENSOR_LON=
 
-# ── Secrets — nothing to do here on this path. The two lines are already set:
-# the unit runs without Twilio and declares it (D-019); the dashboard shows
-# "banco, sin Twilio", informational, not an error. When you have Twilio
-# credentials, fill in SID/TOKEN and delete BOTH lines together.
-OCEANKIND_ALLOW_NO_TWILIO=1
-OCEANKIND_BENCH=1
-OCEANKIND_TWILIO_SID=
-OCEANKIND_TWILIO_TOKEN=
-
 # ── Dashboard backend ──
 OCEANKIND_BACKEND_URL=https://marfutura.buenalynch.com   # base URL only, no /api/...
-OCEANKIND_DEVICE_KEY=<key from step 2>
+OCEANKIND_DEVICE_SECRET=<secret from step 2>
 ```
 
-**Remote tuning.** Further down, under `── Detection ──`, `OCEANKIND_CONFIG_HMAC_KEY` is commented out. Without it the unit rejects every remote configuration document (by design, F-10) and only its env-file thresholds apply. To tune thresholds from the dashboard, uncomment it and paste the same key the backend holds (`OCEANKIND_CONFIG_HMAC_KEY` in the backend's `.env`). Push-only units fetch the signed document from `GET /api/devices/config` every 5 minutes.
+That is every secret there is. No Twilio, no phone numbers, no bench flag: alerts to humans leave from the backend, from what this unit sends it (D-020).
+
+**Remote tuning and updates need nothing more.** The unit verifies configuration documents with a key derived from that same secret, so **Admin → Dispositivos → Configurar** works as soon as it has connected once; push-only units fetch the signed document from `GET /api/devices/config` every 5 minutes. The same document carries the assigned release (step 7 below).
 
 **No hydrophone yet?** Further down the file, under `── Audio ──`, two lines are already there, commented out. Uncomment both to test the whole chain with a realistic synthetic detection every ~12 min:
 
@@ -117,9 +111,20 @@ journalctl -u oceankind -n 30 | grep -i push
 ## 7. Confirm on the dashboard
 
 - **Admin → Dispositivos:** the unit has a fresh **last_seen**.
-- **Estado del sensor** tab for its site: health, not just liveness — `capture_ok` true, `duty_cycle_pct` ≥ 99, `last_clip_age_s` under 10, `capture_overflows` ~0, `events_dropped` 0, no `degraded_reason`. `alerts_enabled: false` with the "banco, sin Twilio" badge is expected on this path.
-- The test event appears under its site, under **Detecciones**.
+- **Estado del sensor** tab for its site: health, not just liveness — `capture_ok` true, `duty_cycle_pct` ≥ 99, `last_clip_age_s` under 10, `capture_overflows` ~0, `events_dropped` 0, no `degraded_reason`.
+- The test event appears under its site, under **Detecciones**. If the backend has Twilio configured, the WhatsApp for it arrives from there.
 - Clip playback returns 404 when audio storage isn't configured. That is expected, not a fault.
+- **Versión** column in Admin → Dispositivos: what the unit runs. A freshly provisioned unit shows *sin registro* until its first OTA; once a release is assigned (next step) it shows `installed → assigned (pendiente)`, then the installed tag alone.
+
+## 8. Updates: assign a release from the dashboard
+
+Units never pull `main`. A version is published by creating a git tag on the repository (`git tag v2.2.0 && git push --tags`), and each unit takes it only when assigned (D-021):
+
+1. **Admin → Dispositivos → Actualizar** on the unit → pick or type the tag → **Asignar**. Within 5 minutes the unit downloads that exact tag, installs it, restarts, watches itself for a minute and rolls back if it does not stay up. The column shows the result; red *falló … revertida* means the tag broke this unit and will not be retried on its own.
+2. Stage it: bench first, then one site, then the rest. **Retener** freezes a unit so nothing moves it, whatever is assigned.
+3. **Versiones → Predeterminada** is only for units created afterwards.
+
+A daily timer on the unit repeats the convergence in case the service was down when the assignment changed. Nothing else updates a unit — not `git pull`, not re-running `setup.sh` (that is for a fresh provision or a changed env file).
 
 ---
 
@@ -129,18 +134,20 @@ journalctl -u oceankind -n 30 | grep -i push
 |---|---|
 | `<hostname>.local` not found | Wait a minute or use the IP from the router. Zero W: 2.4 GHz only |
 | Service won't start | `journalctl -u oceankind -n 20` names the missing/invalid variable |
-| Won't start, journal says `ALLOW_NO_TWILIO=1 con OCEANKIND_BACKEND_URL` | Unit provisioned before 2026-10-24 and updated without re-running `setup.sh`. Re-run it (adds `OCEANKIND_BENCH=1` automatically) or add that line to `/etc/oceankind.env` (D-019) |
+| Won't start, journal says `OCEANKIND_DEVICE_KEY es la variable anterior a D-020` | Unit provisioned before 2026-10-24. Delete the device in Admin → Dispositivos, create it again, put the new secret in `/etc/oceankind.env` as `OCEANKIND_DEVICE_SECRET` and remove the `OCEANKIND_DEVICE_KEY` line (Twilio/BENCH lines can go too). The panel marks such units *re-provisionar* |
 | `degraded_reason` says `captura detenida` | No audio window for 60 s: card unplugged, mixer muted (F-28), or stream died. `arecord -l`, `amixer -c 0 contents`, then restart |
-| No `last_seen` on the dashboard | Check `OCEANKIND_BACKEND_URL`/`OCEANKIND_DEVICE_KEY` are set and the device isn't `401`/`403` (rows below) |
-| Push log: `401` | ID/key don't match an active device. Re-check the key or recreate the device |
+| No `last_seen` on the dashboard | Check `OCEANKIND_BACKEND_URL`/`OCEANKIND_DEVICE_SECRET` are set and the device isn't `401`/`403` (rows below) |
+| Push log: `401` | ID/secret don't match an active device. Re-check the secret or recreate the device |
+| Versión column red: `falló vX, revertida` | That tag broke this unit; it rolled back and will not retry it. Read `/tmp/oceankind/logs/update.log` on the unit, publish a fixed tag, assign that |
+| Assigned a release, nothing happens after 10 min | Unit is *retenida* (Liberar), or the service is down (the daily timer will still converge), or the tag does not exist on GitHub (`update.log` says `no existe`) |
 | Push log: `403` | Read the logged response body. JSON `site mismatch` = the site differs from the registered one; `error code: 1010` = blocked upstream, report it |
 | `backend inalcanzable` | No internet or backend down. Events spool locally (max 500) and retry |
 | No detections | Still on `device` source with no hydrophone. Set a synthetic source (step 5) |
 | Different USB/ALSA hardware | Set `OCEANKIND_AUDIO_DEVICE_NAME` to a substring of the card name (`arecord -l`) |
 | `arecord` fails with `Input/output error`, card shows fine in `arecord -l` | Not a kernel issue (confirmed F-28) — check `amixer -c 0 contents` for `ADC Switch`/`Aux Switch` stuck `off`. `setup.sh`'s `ExecStartPre` should set these on every start; re-run it if they're off |
-| Python capture crashes with `PortAudioError: ... Wait timed out [PaErrorCode -9987]` | F-29 — fixed in `capture.py` (blocking read, not a PortAudio callback thread). Re-run `setup.sh` to pick up the current code; this means the unit is running an old copy |
+| Python capture crashes with `PortAudioError: ... Wait timed out [PaErrorCode -9987]` | F-37 — fixed in `capture.py` (blocking read, not a PortAudio callback thread). The unit is running an old copy: assign it a current release (step 8) |
 
 **After any env change:** `sudo systemctl restart oceankind`.
-**After a code update:** `git pull` in `~/Rpi-Detector`, then re-run `setup.sh`. It won't overwrite `/etc/oceankind.env`.
+**After a code update:** assign the new release from the dashboard (step 8). Re-running `setup.sh` is for a fresh provision; it won't overwrite `/etc/oceankind.env` and it does not update the code of a provisioned unit any more reliably than the OTA does.
 
 Deeper detail (soak testing, event-rate tuning, Cloudflare quirks): `raspberry-pi/docs/BENCH.md`.

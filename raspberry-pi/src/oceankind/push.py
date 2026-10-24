@@ -99,7 +99,7 @@ def _post(event: dict) -> str:
             "Content-Type": "application/json",
             "User-Agent":   _USER_AGENT,
             "X-Device-Id":  C.DEVICE_ID,
-            "X-Device-Key": C.DEVICE_KEY,
+            "X-Device-Key": C.AUTH_KEY,     # derivada del secreto (D-020)
         },
     )
     eid = str(event.get("event_id", "?"))[:8]
@@ -132,7 +132,7 @@ def _post(event: dict) -> str:
         # indistinguible de uno muerto: evento de salud, no línea de log.
         _latch_auth_failed()
         log.error("push %s: 401 — credencial del backend rechazada (%s). Push DETENIDO; se "
-                  "reintenta una vez cada %.0f s (OCEANKIND_DEVICE_KEY). El blob sigue "
+                  "reintenta una vez cada %.0f s (OCEANKIND_DEVICE_SECRET). El blob sigue "
                   "escribiéndose.", eid, body_snippet or "sin cuerpo", C.AUTH_RETRY_S)
         return "auth"
     if code in (400, 403):
@@ -267,7 +267,7 @@ def post_heartbeat(status: dict) -> None:
             "Content-Type": "application/json",
             "User-Agent":   _USER_AGENT,
             "X-Device-Id":  C.DEVICE_ID,
-            "X-Device-Key": C.DEVICE_KEY,
+            "X-Device-Key": C.AUTH_KEY,     # derivada del secreto (D-020)
         },
     )
     body_snippet = ""
@@ -301,7 +301,7 @@ def post_heartbeat(status: dict) -> None:
         with _lock:
             _hb_fail_streak += 1
         log.error("heartbeat: 401 — credencial del backend rechazada (%s). Heartbeat y push "
-                  "de eventos DETENIDOS; se reintenta una vez cada %.0f s (OCEANKIND_DEVICE_KEY).",
+                  "de eventos DETENIDOS; se reintenta una vez cada %.0f s (OCEANKIND_DEVICE_SECRET).",
                   body_snippet or "sin cuerpo", C.AUTH_RETRY_S)
         return
     # Cualquier otro código (400/403/5xx/inesperado): se descarta igual, sin
@@ -322,8 +322,10 @@ def spool_len() -> int:
 
 
 def fetch_config() -> dict | None:
-    """GET /api/devices/config — el documento de configuración firmado, byte a
-    byte el mismo que el blob `sites/{site}/remote_config.json` (D-020).
+    """GET /api/devices/config — el documento de configuración firmado PARA ESTE
+    equipo, byte a byte lo que el backend firmó con la clave de este equipo
+    (D-020; con un solo equipo por sitio es también el blob
+    `sites/{site}/remote_config.json`).
 
     Camino de ENTREGA para las unidades push-only (sin Azure ni OUTPUT_DIR):
     antes la config remota solo se consultaba con almacenamiento activo, así
@@ -345,7 +347,7 @@ def fetch_config() -> dict | None:
         headers={
             "User-Agent":   _USER_AGENT,
             "X-Device-Id":  C.DEVICE_ID,
-            "X-Device-Key": C.DEVICE_KEY,
+            "X-Device-Key": C.AUTH_KEY,     # derivada del secreto (D-020)
         },
     )
     try:

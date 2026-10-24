@@ -8,7 +8,7 @@ Asserts, against a real HTTP server enforcing the spec:
   5. 401 -> push stops entirely, surfaced in health.degraded_reason
   6. the invariant: blob written regardless of push outcome, via the real
      transport worker path (_process_job)
-  7. URL without device key refuses to start (R-8.1)
+  7. URL without device secret refuses to start (R-8.1); legacy DEVICE_KEY refuses too (D-020)
 
     python3 raspberry-pi/tools/push_test.py
 """
@@ -61,8 +61,8 @@ server = ThreadingHTTPServer(("127.0.0.1", 0), Fake)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 BASE = f"http://127.0.0.1:{server.server_address[1]}"
 
+SECRET = "test-device-secret-abc"
 os.environ.update({
-    "OCEANKIND_ALLOW_NO_TWILIO": "1",
     "OCEANKIND_OUTPUT_DIR": str(OUT),
     "OCEANKIND_SITE": "banco",
     "OCEANKIND_DEVICE_ID": "Rpi_bench",
@@ -71,7 +71,7 @@ os.environ.update({
     "OCEANKIND_SENSOR_LON": "-71.0",
     "OCEANKIND_STATE_DIR": str(STATE),
     "OCEANKIND_BACKEND_URL": BASE,
-    "OCEANKIND_DEVICE_KEY": "test-device-key-abc",
+    "OCEANKIND_DEVICE_SECRET": SECRET,
     "OCEANKIND_BACKEND_TIMEOUT_S": "5",
 })
 sys.path.insert(0, str(REPO / "raspberry-pi" / "src"))
@@ -99,7 +99,9 @@ check("one request", len(Fake.requests) == 1)
 r = Fake.requests[-1]
 check("path /api/devices/events", r["path"] == "/api/devices/events")
 check("X-Device-Id header", r["device_id"] == "Rpi_bench")
-check("X-Device-Key header", r["device_key"] == "test-device-key-abc")
+# D-020: what goes on the wire is the DERIVED auth key, never the secret
+check("X-Device-Key header is the derived auth key", r["device_key"] == C.derive_keys(SECRET)[0]
+      and r["device_key"] != SECRET)
 check("Content-Type json", r["content_type"] == "application/json")
 check("body byte-identical to the blob", r["body"] == (OUT / ev_rel).read_bytes())
 check("captured_utc carries UTC offset", "+00:00" in json.loads(r["body"])["captured_utc"])
@@ -153,7 +155,7 @@ for f in C.PUSH_SPOOL_DIR.glob("*.json"):
 print("6. the invariant, through the real transport worker")
 Fake.mode = "ok"
 n_before = len(Fake.requests)
-pipe = pipeline.Pipeline(iot_client=None)
+pipe = pipeline.Pipeline()
 tone = (0.3 * np.sin(2 * np.pi * 120 * np.arange(48000) / 48000) * 32000).astype(np.int16)
 clip = np.column_stack([tone, tone])
 
@@ -185,16 +187,26 @@ check("backend down: blob STILL written (the invariant)", (OUT / job2["event_rel
 check("backend down: push spooled, nothing lost", push.spool_len() == 1)
 check("suppressed events push too", json.loads((OUT / job2["event_rel"]).read_text())["suppressed"] is True)
 
-print("7. URL without device key refuses to start (R-8.1)")
-res = subprocess.run([sys.executable, "-c", (
-    "import os,sys; os.environ.update({'OCEANKIND_ALLOW_NO_TWILIO':'1',"
-    f"'OCEANKIND_BACKEND_URL':'{BASE}','OCEANKIND_DEVICE_KEY':''}});"
-    f"sys.path.insert(0,{str(REPO / 'raspberry-pi' / 'src')!r});"
-    "from oceankind import config as C\n"
-    "try:\n C.validate_startup_config(); print('STARTED')\n"
-    "except SystemExit: print('REFUSED')"
-)], capture_output=True, text=True)
-check("refuses to start", "REFUSED" in res.stdout, f"({res.stdout.strip()!r})")
+print("7. URL without device secret refuses to start (R-8.1, D-020)")
+
+
+def _startup(env: dict) -> str:
+    res = subprocess.run([sys.executable, "-c", (
+        f"import os,sys; os.environ.update({env!r});"
+        f"sys.path.insert(0,{str(REPO / 'raspberry-pi' / 'src')!r});"
+        "from oceankind import config as C\n"
+        "try:\n C.validate_startup_config(); print('STARTED')\n"
+        "except SystemExit: print('REFUSED')"
+    )], capture_output=True, text=True)
+    return res.stdout.strip()
+
+
+check("URL without secret refuses to start",
+      _startup({"OCEANKIND_BACKEND_URL": BASE, "OCEANKIND_DEVICE_SECRET": "", "OCEANKIND_SITE": "banco"}) == "REFUSED")
+check("legacy OCEANKIND_DEVICE_KEY without secret refuses to start (re-provision, D-020)",
+      _startup({"OCEANKIND_BACKEND_URL": BASE, "OCEANKIND_DEVICE_KEY": "old", "OCEANKIND_SITE": "banco"}) == "REFUSED")
+check("URL + secret starts",
+      _startup({"OCEANKIND_BACKEND_URL": BASE, "OCEANKIND_DEVICE_SECRET": SECRET, "OCEANKIND_SITE": "banco"}) == "STARTED")
 
 server.shutdown()
 print()

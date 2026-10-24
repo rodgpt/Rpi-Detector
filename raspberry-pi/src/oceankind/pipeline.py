@@ -2,8 +2,9 @@
 
   clasificador : arma clips de 5 s del stream y corre el detector sobre CADA
                  uno, sin huecos. Decide alerta/supresión. No toca la red.
-  transporte   : sube clip + evento, notifica WhatsApp/IoT. Toda la red vive
-                 acá; una subida lenta atrasa OTRAS subidas, jamás la escucha.
+  transporte   : sube clip + evento y lo empuja al backend, que es quien avisa
+                 (D-020). Toda la red vive acá; una subida lenta atrasa OTRAS
+                 subidas, jamás la escucha.
 
 Entre ambos, una cola acotada con política explícita (R-1.3): si transporte se
 atasca, el EVENTO se preserva (spool en disco) y solo el audio del clip se
@@ -21,7 +22,6 @@ from . import capture
 from . import config as C
 from . import detectors as registry
 from . import health
-from . import notify
 from . import push
 from . import storage
 
@@ -38,12 +38,11 @@ def _level_bar(rms: float, threshold: float, width: int = 40) -> str:
 
 
 class Pipeline:
-    def __init__(self, iot_client=None):
+    def __init__(self):
         self.block_queue     = queue.Queue(maxsize=C.BLOCK_QUEUE_MAX)
         self.transport_queue = queue.Queue(maxsize=C.TRANSPORT_QUEUE_MAX)
         self.stop_event      = threading.Event()
-        self.iot_client      = iot_client
-        self.alert_count     = 0      # alertas NOTIFICADAS esta sesión
+        self.alert_count     = 0      # detecciones NO suprimidas esta sesión (las que el backend anuncia)
         self.last_rms        = 0.0
         self.last_peak_db    = -180.0
         self._last_alert     = 0.0    # solo lo toca el hilo clasificador
@@ -213,9 +212,6 @@ class Pipeline:
                 push.spool_for_later(event)
 
     def _process_job(self, job: dict) -> None:
-        # Cuenta CADA detección (también suprimidas) para el clúster de voz.
-        notify.maybe_trigger_cluster_call()
-
         clip_uploaded = False
         # 1) Clip PRIMERO (F-13/R-4.5): notificar antes de subir produce links
         #    muertos permanentes.
@@ -235,22 +231,11 @@ class Pipeline:
 
         # 2b) Push directo al backend — DESPUÉS e independiente del blob. Su
         #     resultado no puede tocar nada: solo compra latencia del índice.
+        #     Y desde D-020 es también el camino de la alerta: el backend manda
+        #     el WhatsApp (con el enlace al clip ya subido, por eso el orden) y
+        #     cuenta el clúster para la llamada de voz. El dispositivo no
+        #     notifica a nadie.
         push.push_event(event)
 
-        # 3) Notificar DESPUÉS del upload, solo detecciones no suprimidas.
         if not job["suppressed"]:
-            d = job["detection"]
-            notify.send_whatsapp(job["rms"], job["peak_db"],
-                                 job["clip_rel"] if clip_uploaded else None,
-                                 ml_result={"proba": d["score"], "label": d["label"]},
-                                 label=d["label"])
             self.alert_count += 1
-            if self.iot_client:
-                try:
-                    notify.send_iot_message(self.iot_client, job["rms"], job["peak_db"],
-                                            msg_type="alert",
-                                            audio_url=job["clip_rel"] if clip_uploaded else None,
-                                            threshold=C.CONFIG.snapshot()["alert_threshold"])
-                    log.info("  → Alerta enviada a IoT Hub")
-                except Exception as exc:
-                    log.warning("  Error enviando alerta IoT: %s", exc)

@@ -14,33 +14,9 @@ import os
 import re
 import sys
 import threading
-import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 log = logging.getLogger("oceankind")
-
-# ── Hora local ───────────────────────────────────────────────────────────────
-# Los WhatsApp van en hora de Chile; internamente todo se guarda en UTC.
-try:
-    from zoneinfo import ZoneInfo
-    LOCAL_TZ = ZoneInfo(os.getenv("OCEANKIND_TZ", "America/Santiago"))
-except Exception:
-    LOCAL_TZ = timezone(timedelta(hours=-4))
-
-
-def fmt_local(dt=None, fmt="%Y-%m-%d %H:%M"):
-    d = dt or datetime.now(timezone.utc)
-    if d.tzinfo is None:
-        d = d.replace(tzinfo=timezone.utc)
-    return d.astimezone(LOCAL_TZ).strftime(fmt)
-
-
-def fmt_local_iso(iso_str, fmt="%Y-%m-%d %H:%M"):
-    try:
-        return fmt_local(datetime.fromisoformat(iso_str), fmt)
-    except Exception:
-        return iso_str or "n/d"
 
 
 def _env_float(name: str):
@@ -67,20 +43,11 @@ SCHEMA_VERSION = 2
 SITE_ID_RE = re.compile(r"^[a-z0-9_-]+$")
 
 # ── Identidad y almacenamiento ───────────────────────────────────────────────
-IOTHUB_CONNECTION_STRING  = os.environ.get("OCEANKIND_IOTHUB_CONNECTION_STRING", "")
-# Rama muerta conocida (nada la consume; TODO.md). Apagada por defecto: solo se
-# conecta con la bandera explícita Y la connection string. connect() sin
-# timeout bloqueaba el arranque de la captura si el hub no respondía.
-IOTHUB_ENABLED            = (os.environ.get("OCEANKIND_IOTHUB_ENABLED", "0") == "1"
-                             and bool(IOTHUB_CONNECTION_STRING))
-IOTHUB_CONNECT_TIMEOUT_S  = float(os.environ.get("OCEANKIND_IOTHUB_CONNECT_TIMEOUT_S", "10"))
 STORAGE_CONNECTION_STRING = os.environ.get("OCEANKIND_STORAGE_CONNECTION_STRING", "")
 STORAGE_CONTAINER         = os.environ.get("OCEANKIND_STORAGE_CONTAINER", "alerts")
 # Modo banco/validación (R-9.4): blobs como archivos locales; validar con
 # tools/validate_contract.py.
 OUTPUT_DIR                = os.environ.get("OCEANKIND_OUTPUT_DIR", "").strip()
-DASHBOARD_URL             = os.environ.get("OCEANKIND_DASHBOARD_URL",
-                                           "https://marfuturatest.z6.web.core.windows.net/index.html")
 DEVICE_ID                 = os.environ.get("OCEANKIND_DEVICE_ID", "Rpi_casa")
 SITE                      = os.environ.get("OCEANKIND_SITE", "").strip().strip("/").lower()
 STORAGE_ENABLED           = bool(STORAGE_CONNECTION_STRING or OUTPUT_DIR)
@@ -94,46 +61,13 @@ SENSOR_LAT           = _env_float("OCEANKIND_SENSOR_LAT")
 SENSOR_LON           = _env_float("OCEANKIND_SENSOR_LON")
 SENSOR_LOCATION_NAME = os.environ.get("OCEANKIND_SENSOR_LOCATION", DEVICE_ID)
 
-# ── Twilio ── SIN defaults literales (F-04) ──────────────────────────────────
-TWILIO_ACCOUNT_SID = os.environ.get("OCEANKIND_TWILIO_SID", "")
-TWILIO_AUTH_TOKEN  = os.environ.get("OCEANKIND_TWILIO_TOKEN", "")
-ALLOW_NO_TWILIO    = os.environ.get("OCEANKIND_ALLOW_NO_TWILIO", "0") == "1"
-TWILIO_CONFIGURED  = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN)
-# Declaración explícita de banco de pruebas. ALLOW_NO_TWILIO=1 por sí solo ya no
-# basta en una unidad que SÍ alcanza el backend o el almacenamiento: esa unidad
-# produce datos reales y no tiene cómo avisar a un humano. Sin esta variable, esa
-# combinación se niega a arrancar (validate_startup_config, D-019).
-BENCH              = os.environ.get("OCEANKIND_BENCH", "0") == "1"
-TWILIO_FROM        = os.environ.get("OCEANKIND_TWILIO_FROM", "whatsapp:+56926280872")
-_TWILIO_TO_RAW     = os.environ.get("OCEANKIND_TWILIO_TO", "whatsapp:+56961987942")
-TWILIO_TO_LIST     = [n.strip() for n in _TWILIO_TO_RAW.split(",") if n.strip()]
-TWILIO_TO          = TWILIO_TO_LIST[0] if TWILIO_TO_LIST else ""
-# Timeout explícito de TODA llamada Twilio (R-5.5): una llamada sin timeout en
-# el hilo de transporte es un backlog; en el viejo loop único era sordera.
-TWILIO_TIMEOUT_S   = float(os.environ.get("OCEANKIND_TWILIO_TIMEOUT_S", "15"))
-
-
-def _to_list(env_name: str) -> list:
-    raw = os.environ.get(env_name, "").strip() or _TWILIO_TO_RAW
-    return [n.strip() for n in raw.split(",") if n.strip()]
-
-
-TO_ALERTA  = _to_list("OCEANKIND_TO_ALERTA")
-TO_TECNICO = _to_list("OCEANKIND_TO_TECNICO")
-
-# Plantillas WhatsApp aprobadas (Content SIDs) — no son secretos.
-WA_TPL_ALERT     = os.environ.get("OCEANKIND_WA_TPL_ALERT",     "HX901414845dda773c146ce65d79f79863")
-WA_TPL_HEARTBEAT = os.environ.get("OCEANKIND_WA_TPL_HEARTBEAT", "HXe9015f651079907384ecabf3add8dd69")
-WA_TPL_BATTERY   = os.environ.get("OCEANKIND_WA_TPL_BATTERY",   "HX9cad665cd4be3a5a5482162d1776d1ba")
-WA_TPL_VERSION   = os.environ.get("OCEANKIND_WA_TPL_VERSION", "3").strip()
-
-# Llamada de voz ante clúster de detecciones
-CALL_ENABLED          = os.environ.get("OCEANKIND_CALL_ENABLED", "1") == "1"
-CALL_FROM             = os.environ.get("OCEANKIND_CALL_FROM", "+15733060329")
-CALL_TO_LIST          = [n.strip() for n in os.environ.get("OCEANKIND_CALL_TO", "+56961987942").split(",") if n.strip()]
-CALL_CLUSTER_COUNT    = int(os.environ.get("OCEANKIND_CALL_CLUSTER_COUNT", "3"))
-CALL_CLUSTER_WINDOW_S = float(os.environ.get("OCEANKIND_CALL_CLUSTER_WINDOW_S", "240"))
-CALL_COOLDOWN_S       = float(os.environ.get("OCEANKIND_CALL_COOLDOWN_S", "900"))
+# ── Alertas: el dispositivo NO avisa a nadie (D-020) ─────────────────────────
+# Toda alerta WhatsApp/voz sale del backend, con la única credencial Twilio del
+# sistema, a partir de lo que este dispositivo ya le manda: el push de eventos,
+# el heartbeat (health.degraded_reason, power.battery_voltage_v) y la AUSENCIA
+# de heartbeats — la única alerta que un equipo muerto jamás podría mandar
+# sobre sí mismo. Aquí no hay Twilio, ni IoT Hub, ni números de teléfono, ni
+# banco declarado: nada de eso tiene ya qué describir.
 
 # ── Audio ────────────────────────────────────────────────────────────────────
 SAMPLE_RATE     = 48000
@@ -224,7 +158,6 @@ ML_SCORE_MIN  = float(os.environ.get("OCEANKIND_ML_SCORE_MIN", "0.60"))
 ML_LABEL      = os.environ.get("OCEANKIND_ML_LABEL", "IMPULSO")
 
 # ── Cadencias y rutas ────────────────────────────────────────────────────────
-WHATSAPP_HEARTBEAT_INTERVAL = float(os.environ.get("OCEANKIND_WA_HEARTBEAT_S", "43200"))
 CONFIG_CHECK_INTERVAL       = float(os.environ.get("OCEANKIND_CONFIG_CHECK_S", "300"))
 POWER_HISTORY_HOURS         = 72
 POWER_HISTORY_BUCKET_S      = 30 * 60
@@ -259,10 +192,25 @@ STATE_DIR = Path(os.environ.get("OCEANKIND_STATE_DIR", "/tmp/oceankind"))
 DATA_LOG_PATH = Path(os.environ.get("OCEANKIND_DATA_LOG", str(STATE_DIR / "oceankind_data.csv")))
 DATA_LOG_MAX_ROWS = int(os.environ.get("OCEANKIND_DATA_LOG_MAX_ROWS", "6000"))
 
-PENDING_ALERTS_FILE = Path(os.environ.get("OCEANKIND_PENDING_ALERTS",
-                                          str(Path.home() / "oceankind" / "pending_alerts.json")))
-BATTERY_STATE_FILE  = Path(os.environ.get("OCEANKIND_BATTERY_STATE",
-                                          str(STATE_DIR / "battery_state.json")))
+# ── OTA (D-021): lo que update_oceankind.sh escribe y este proceso lee ────────
+# ÚNICA definición de rutas compartida con el script: setup.sh instala en
+# ~/oceankind y el script define el mismo layout en su cabecera.
+INSTALL_DIR           = Path(os.environ.get("OCEANKIND_INSTALL_DIR", str(Path.home() / "oceankind")))
+OTA_SCRIPT            = INSTALL_DIR / "update_oceankind.sh"
+INSTALLED_SHA_FILE    = INSTALL_DIR / ".installed_sha"
+INSTALLED_REF_FILE    = INSTALL_DIR / ".installed_release"
+FAILED_SHA_FILE       = INSTALL_DIR / ".ota_failed_sha"
+FAILED_REF_FILE       = INSTALL_DIR / ".ota_failed_release"
+ASSIGNED_RELEASE_FILE = INSTALL_DIR / ".assigned_release"
+OTA_LOCK_DIR          = STATE_DIR / "ota.lock"        # el mismo mkdir-lock del script
+OTA_LOG_FILE          = STATE_DIR / "logs" / "update.log"
+# Entre dos lanzamientos del OTA por la misma asignación. El script es
+# idempotente y barato sin red, pero un bucle cada 5 min por un tag que no
+# existe sería ruido; media hora deja margen a arreglarlo en el panel.
+OTA_RETRIGGER_S       = float(os.environ.get("OCEANKIND_OTA_RETRIGGER_S", "1800"))
+# Lo que puede ser un nombre de release. Va a la línea de comandos del script:
+# esta expresión es lo que hace que eso sea seguro (contrato §Device configuration).
+RELEASE_RE = re.compile(r"^v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}$")
 
 ARCHIVE_INTERVAL  = float(os.environ.get("OCEANKIND_ARCHIVE_INTERVAL", "60"))
 ARCHIVE_DIR       = Path(os.environ.get("OCEANKIND_ARCHIVE_DIR", str(Path.home() / "oceankind" / "archive_queue")))
@@ -276,9 +224,31 @@ EVENT_SPOOL_MAX = int(os.environ.get("OCEANKIND_EVENT_SPOOL_MAX", "500"))
 # Segundo camino por evento, ADEMÁS del blob (jamás en vez de). Vacío = sin
 # push: el índice del dashboard se entera solo por su pase de reconciliación.
 BACKEND_URL       = os.environ.get("OCEANKIND_BACKEND_URL", "").strip()
-# Clave por dispositivo, emitida por el backend al registrar la unidad
-# (Dashboard D-017). Secreto: sin default literal, obligatoria con BACKEND_URL.
-DEVICE_KEY        = os.environ.get("OCEANKIND_DEVICE_KEY", "")
+# EL secreto del dispositivo (D-020): uno solo, emitido una vez por el panel al
+# crear la unidad, pegado en /etc/oceankind.env. De él se derivan DOS claves con
+# etiquetas fijas, idénticas a las del backend (core/security.derive_keys):
+#   AUTH_KEY   — lo que va en X-Device-Key en cada petición
+#   CONFIG_KEY — con lo que se verifica la firma de la config remota
+# Así la clave que viaja en cada request no es la que firma configuración, y un
+# equipo robado entrega claves que sólo valen para ese equipo. Sin default
+# literal (F-04); obligatorio con BACKEND_URL.
+DEVICE_SECRET     = os.environ.get("OCEANKIND_DEVICE_SECRET", "").strip()
+# La variable anterior a D-020. Si está y el secreto no, la unidad se niega a
+# arrancar: hay que re-crear el dispositivo en el panel y pegar el secreto nuevo.
+LEGACY_DEVICE_KEY = os.environ.get("OCEANKIND_DEVICE_KEY", "").strip()
+_AUTH_LABEL   = b"oceankind:auth:v1"
+_CONFIG_LABEL = b"oceankind:config:v1"
+
+
+def derive_keys(secret: str) -> tuple[str, str]:
+    """(auth_key, config_key): HMAC-SHA256 hex de una etiqueta fija bajo el
+    secreto. Cambiar esto es cambiar el contrato (§Provisioning secret)."""
+    k = secret.encode()
+    return (hmac.new(k, _AUTH_LABEL, hashlib.sha256).hexdigest(),
+            hmac.new(k, _CONFIG_LABEL, hashlib.sha256).hexdigest())
+
+
+AUTH_KEY, CONFIG_KEY = derive_keys(DEVICE_SECRET) if DEVICE_SECRET else ("", "")
 BACKEND_TIMEOUT_S = float(os.environ.get("OCEANKIND_BACKEND_TIMEOUT_S", "10"))
 PUSH_SPOOL_DIR    = Path(os.environ.get("OCEANKIND_PUSH_SPOOL_DIR", str(STATE_DIR / "push_spool")))
 PUSH_SPOOL_MAX    = int(os.environ.get("OCEANKIND_PUSH_SPOOL_MAX", "500"))
@@ -300,16 +270,9 @@ VEDIRECT_PORT = os.environ.get("OCEANKIND_VEDIRECT_PORT", "")
 WATCHDOG_PING_S     = float(os.environ.get("OCEANKIND_WATCHDOG_PING_S", "20"))
 WATCHDOG_BEAT_MAX_S = float(os.environ.get("OCEANKIND_WATCHDOG_BEAT_MAX_S", "60"))
 
-# Umbrales batería
-BATTERY_WARNING_V       = float(os.environ.get("OCEANKIND_BATT_WARNING_V",  "11.8"))
-BATTERY_CRITICAL_V      = float(os.environ.get("OCEANKIND_BATT_CRITICAL_V", "11.2"))
-BATTERY_EMERGENCY_V     = float(os.environ.get("OCEANKIND_BATT_EMERGENCY_V", "10.8"))
-BATTERY_RECOVERY_V      = float(os.environ.get("OCEANKIND_BATT_RECOVERY_V",  "12.2"))
-BATTERY_DEBOUNCE_CYCLES = int(os.environ.get("OCEANKIND_BATT_DEBOUNCE_CYCLES", "10"))
-
-# Firma HMAC de la config remota (F-10). Si la clave está definida, un payload
-# sin firma válida se RECHAZA. Sin clave, se aplica con warning (clamps igual).
-CONFIG_HMAC_KEY = os.environ.get("OCEANKIND_CONFIG_HMAC_KEY", "")
+# Umbrales de batería: viven en el backend desde D-020 (los decide a partir de
+# power.battery_voltage_v del heartbeat, con el mismo debounce e histéresis).
+# Aquí sólo se mide y se publica.
 
 
 # ── Parámetros afinables en caliente ─────────────────────────────────────────
@@ -339,6 +302,11 @@ CLAMPS = {
 # un enum deshabilitaría la detección, así que se RECHAZA el documento entero.
 CONFIG_KEYS = set(CLAMPS) | {"detection_mode"}
 DETECTION_MODES = ("psd", "rms", "auto")
+# release/hold (D-021) viajan en el mismo objeto firmado pero no son umbrales:
+# no entran a RuntimeConfig, los consume el disparador OTA (ota.py). Se validan
+# aquí (tag con forma de tag, hold booleano) y un valor inválido rechaza el
+# documento entero, como cualquier otra clave.
+RELEASE_KEYS = {"release", "hold"}
 
 
 class ConfigRejected(Exception):
@@ -404,25 +372,27 @@ def verify_remote_config(payload: dict) -> dict | None:
     configuration de docs/DATA-CONTRACT.md). Convergido 2026-08-22 con el
     backend, que ESCRIBE este blob.
 
-    Devuelve el objeto `config` a aplicar, o None si el documento va dirigido
-    a otra unidad (`device_id` distinto). Levanta ConfigRejected — evento de
-    salud — ante: clave HMAC no aprovisionada, firma inválida, objeto config
-    ausente, claves desconocidas, enum inválido o banda PSD invertida. Un
-    documento rechazado se descarta ENTERO; jamás se aplica a medias.
+    Devuelve el objeto `config` a aplicar (umbrales Y release/hold), o None si
+    el documento va dirigido a otra unidad (`device_id` distinto). Levanta
+    ConfigRejected — evento de salud — ante: secreto no aprovisionado, firma
+    inválida, objeto config ausente, claves desconocidas, enum inválido, banda
+    PSD invertida, release que no es un tag o hold no booleano. Un documento
+    rechazado se descarta ENTERO; jamás se aplica a medias.
     """
-    # Sin clave, el dispositivo NO acepta config remota alguna. Aplicar sin
+    # Sin secreto, el dispositivo NO acepta config remota alguna. Aplicar sin
     # firma "con warning" era el agujero F-10 reabierto.
-    if not CONFIG_HMAC_KEY:
-        raise ConfigRejected("OCEANKIND_CONFIG_HMAC_KEY no aprovisionada — "
+    if not CONFIG_KEY:
+        raise ConfigRejected("OCEANKIND_DEVICE_SECRET no aprovisionado — "
                              "el dispositivo rechaza toda config remota sin firma")
 
     # Firma: HMAC-SHA256 sobre el DOCUMENTO ENTERO menos `signature`, JSON
-    # canónico (claves ordenadas, sin espacios). Idéntico byte a byte al
-    # canonicalizador del backend — dos lados hasheando objetos distintos es
-    # exactamente la falla que la tabla de convergencia documenta.
+    # canónico (claves ordenadas, sin espacios), con la clave DE ESTE equipo
+    # (D-020). Idéntico byte a byte al canonicalizador del backend — dos lados
+    # hasheando objetos distintos es exactamente la falla que la tabla de
+    # convergencia documenta.
     body = {k: v for k, v in payload.items() if k != "signature"}
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
-    expected = hmac.new(CONFIG_HMAC_KEY.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    expected = hmac.new(CONFIG_KEY.encode(), canonical.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, str(payload.get("signature") or "")):
         raise ConfigRejected(f"firma HMAC inválida (config_version {payload.get('config_version')!r})")
 
@@ -439,13 +409,21 @@ def verify_remote_config(payload: dict) -> dict | None:
 
     # Clave desconocida = error, no omisión: un typo que afina nada en
     # silencio es la falla silenciosa que este sistema existe para eliminar.
-    unknown = sorted(set(values) - CONFIG_KEYS)
+    unknown = sorted(set(values) - CONFIG_KEYS - RELEASE_KEYS)
     if unknown:
         raise ConfigRejected(f"claves desconocidas en config: {unknown}")
 
     if "detection_mode" in values and values["detection_mode"] not in DETECTION_MODES:
         raise ConfigRejected(f"detection_mode inválido: {values['detection_mode']!r} "
                              f"(un typo aquí deshabilita la detección)")
+
+    # D-021: el nombre de release acaba en la línea de comandos del OTA. Sólo
+    # pasa lo que tiene forma de tag; `hold` sólo si es booleano de verdad.
+    rel = values.get("release")
+    if rel is not None and not (isinstance(rel, str) and RELEASE_RE.match(rel)):
+        raise ConfigRejected(f"release inválida: {rel!r} (debe ser un tag git, p.ej. v2.2.0)")
+    if "hold" in values and not isinstance(values["hold"], bool):
+        raise ConfigRejected(f"hold inválido: {values['hold']!r} (debe ser true/false)")
 
     # Banda PSD invertida se rechaza (contrato), evaluada sobre el resultado
     # de fusionar el documento con los valores vigentes.
@@ -461,10 +439,6 @@ def verify_remote_config(payload: dict) -> dict | None:
 def validate_startup_config() -> None:
     """Config inválida = NO ARRANCA (R-8.1). systemd reinicia en loop, a gritos."""
     problems = []
-    if not TWILIO_CONFIGURED and not ALLOW_NO_TWILIO:
-        problems.append(
-            "OCEANKIND_TWILIO_SID / OCEANKIND_TWILIO_TOKEN faltan en el entorno. "
-            "Definir en /etc/oceankind.env, o OCEANKIND_ALLOW_NO_TWILIO=1 SOLO en banco de pruebas.")
     if DETECTION_MODE not in ("psd", "rms", "auto"):
         problems.append(f"OCEANKIND_DETECTION_MODE={DETECTION_MODE!r} inválido (psd|rms|auto)")
     if AUDIO_SOURCE != "device" and not AUDIO_SOURCE.startswith("synthetic"):
@@ -480,20 +454,17 @@ def validate_startup_config() -> None:
                 f"OCEANKIND_AUDIO_SOURCE={AUDIO_SOURCE!r}: patrón {pat!r} no existe. "
                 f"Válidos: {'|'.join(SYNTHETIC_PATTERNS)}. Un patrón desconocido "
                 "generaría silencio y el banco no detectaría nada sin avisar.")
-    if BACKEND_URL and not DEVICE_KEY:
-        problems.append("OCEANKIND_BACKEND_URL definida pero falta OCEANKIND_DEVICE_KEY — "
-                        "la clave por dispositivo la emite el backend al registrar la unidad.")
-    # Una unidad que alcanza el backend o el almacenamiento produce datos que
-    # alguien va a mirar; si además no puede avisar a nadie por WhatsApp, eso
-    # es un banco de pruebas y tiene que decirlo (OCEANKIND_BENCH=1), o es una
-    # unidad de producción mal aprovisionada y no debe arrancar (D-019).
-    if (ALLOW_NO_TWILIO and not TWILIO_CONFIGURED and not BENCH
-            and (BACKEND_URL or STORAGE_CONNECTION_STRING)):
+    if LEGACY_DEVICE_KEY and not DEVICE_SECRET:
+        # La unidad fue aprovisionada antes de D-020. Su clave vieja seguiría
+        # autenticando, pero nunca podría verificar una config ni una release:
+        # exactamente la unidad a medias que el panel no puede gobernar.
         problems.append(
-            "OCEANKIND_ALLOW_NO_TWILIO=1 con OCEANKIND_BACKEND_URL/STORAGE configurados: "
-            "la unidad reporta al dashboard pero no puede avisar a ningún humano. "
-            "Si esto es un banco de pruebas, declararlo con OCEANKIND_BENCH=1; si es "
-            "producción, definir OCEANKIND_TWILIO_SID/TOKEN y quitar ALLOW_NO_TWILIO.")
+            "OCEANKIND_DEVICE_KEY es la variable anterior a D-020 y ya no se usa. "
+            "Re-crear el dispositivo en Admin → Dispositivos, pegar el secreto nuevo como "
+            "OCEANKIND_DEVICE_SECRET en /etc/oceankind.env y borrar OCEANKIND_DEVICE_KEY.")
+    if BACKEND_URL and not DEVICE_SECRET:
+        problems.append("OCEANKIND_BACKEND_URL definida pero falta OCEANKIND_DEVICE_SECRET — "
+                        "el secreto por dispositivo lo emite el panel al crear la unidad.")
     if BACKEND_URL and not BACKEND_URL.startswith(("http://", "https://")):
         problems.append(f"OCEANKIND_BACKEND_URL={BACKEND_URL!r} debe empezar con http:// o https://")
     # SITE lo exige CUALQUIERA de los dos destinos, no solo el almacenamiento.
@@ -517,6 +488,8 @@ def validate_startup_config() -> None:
             log.critical("CONFIG INVÁLIDA: %s", p)
         log.critical("El servicio se niega a arrancar con configuración inválida (R-8.1).")
         sys.exit(1)
-    if ALLOW_NO_TWILIO and not TWILIO_CONFIGURED:
-        log.warning("⚠️  Sin credenciales Twilio (OCEANKIND_ALLOW_NO_TWILIO=1) — "
-                    "NINGUNA alerta WhatsApp puede salir. Solo aceptable en banco de pruebas.")
+    if not BACKEND_URL:
+        # Sin backend nadie recibe heartbeats, y desde D-020 el backend es el
+        # único que avisa a un humano: esta unidad no puede alertar a nadie.
+        log.warning("⚠️  Sin OCEANKIND_BACKEND_URL — ningún humano recibirá alertas de esta "
+                    "unidad (D-020: avisa el backend). Sólo aceptable en banco de pruebas.")

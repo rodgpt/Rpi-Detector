@@ -14,8 +14,10 @@ ventana congelada en su último valor sano — duty 100 %, audio_ok true — que
 exactamente el sordo-silencioso que este módulo existe para delatar.
 
 Hilos: record_* corre en captura/clasificador; maybe_alert_* y note_* en
-housekeeping. Los avisos WhatsApp NUNCA salen desde el hilo clasificador: se
-encolan aquí y housekeeping los despacha con flush_degraded_alerts().
+housekeeping. Las degradaciones se encolan aquí y housekeeping las despacha
+con flush_degraded_alerts(), que desde D-020 sólo las deja en el log a nivel
+ERROR: quien avisa al humano es el BACKEND, al ver cambiar
+health.degraded_reason entre dos heartbeats. El dispositivo no manda nada.
 """
 
 import logging
@@ -24,7 +26,6 @@ import time
 from collections import deque
 
 from . import config as C
-from . import notify
 
 log = logging.getLogger("oceankind")
 
@@ -164,17 +165,17 @@ def _queue_alert(reason: str) -> None:
 
 
 def flush_degraded_alerts() -> int:
-    """Despacha los avisos encolados. Llamar SOLO desde housekeeping: Twilio
-    tiene timeout de 15 s por destinatario y eso no puede vivir en el hilo que
-    arma ventanas de audio (antes record_classify_result enviaba directo desde
-    el clasificador). Devuelve cuántos envió."""
+    """Despacha los avisos encolados: una línea ERROR por episodio, desde
+    housekeeping. El aviso al humano lo manda el backend (D-020) cuando ve el
+    cambio en health.degraded_reason del siguiente heartbeat — que ya lleva el
+    mismo motivo. Devuelve cuántos despachó."""
     sent = 0
     while True:
         with _lock:
             if not _alert_queue:
                 return sent
             reason = _alert_queue.popleft()
-        notify.send_degraded_alert(reason)
+        log.error("🔴 DEGRADADO: %s — el backend avisa con el próximo heartbeat", reason)
         sent += 1
 
 
@@ -370,12 +371,6 @@ def maybe_alert_audio_health() -> None:
         _audio_alert_sent = True
 
 
-def audio_status_str() -> str:
-    ok, peak, _n = audio_health()
-    return (f"🎙️ grabando OK (pico {peak:.4f})" if ok
-            else f"⚠️ SIN AUDIO (pico {peak:.4f}) — revisar hidrófono/cable")
-
-
 # ─── Subidas al almacenamiento (spool de eventos) ────────────────────────────
 
 def note_upload_backlog() -> None:
@@ -433,10 +428,6 @@ def build_health() -> dict:
     if not audio_ok:
         reasons.append(f"sin señal de audio (pico RMS {peak_rms:.4f} bajo el piso "
                        f"{C.AUDIO_FLOOR_RMS}) — revisar hidrófono/cable")
-    # Not a degradation: a bench unit with OCEANKIND_ALLOW_NO_TWILIO=1 is working
-    # exactly as configured. Surfaced as its own boolean rather than folded into
-    # `reasons`, so it never flips a healthy unit into "degraded" (dashboard
-    # HealthBadge.readHealth / DATA-CONTRACT.md health.alerts_enabled).
     if push.auth_failed():
         reasons.append("credencial del backend rechazada (401) — push de eventos detenido; "
                        "el blob sigue escribiéndose")
@@ -480,9 +471,7 @@ def build_health() -> dict:
         "push_rejected":      push_rejected,
         "push_dropped":       push_dropped,
         "heartbeat_fail_streak": hb_fail_streak,
-        "wa_pending":         notify.pending_alert_count(),
         "archive_queue":      _archive_queue_len(),
-        "alerts_enabled":     C.TWILIO_CONFIGURED,
         "degraded_reason":    "; ".join(reasons) if reasons else None,
     }
 

@@ -21,7 +21,7 @@ Paths are post-restructure. Last verified: 2 August 2026 (F-01…F-24); later en
 | F-01 | CRITICAL | The `rms` and `auto` detection modes can never fire an alert — **FIXED 2026-08-12** | New | 1 |
 | F-02 | CRITICAL | Model load failure silently disables detection — **FIXED 2026-08-12** | Reports, confirmed | 1 |
 | F-03 | CRITICAL | Cooldown-suppressed detections erased — **FIXED 2026-08-12** (clip leak fixed earlier) | New | 1 |
-| F-04 | CRITICAL | Live Twilio credentials in source, backup and bytecode — **code side FIXED 2026-08-12; rotation still pending** | Reports, confirmed | 1 |
+| F-04 | CRITICAL | Live Twilio credentials in source, backup and bytecode — **CLOSED 2026-10-24**: code side fixed 2026-08-12, token rotated 2026-10-24, and since D-020 the device holds no Twilio credential at all (copies of the old token remain only in the workspace-root `legacy/` tree, scheduled for deletion) | Reports, confirmed | 1 |
 | F-05 | HIGH | Deaf window is longest immediately after a detection — **FIXED 2026-08-13** (continuous capture; bench soak pending) | New (refines reports) | 1 |
 | F-06 | HIGH | OTA update can strand the node with no rollback | Reports, confirmed | 1 |
 | F-07 | HIGH | Blob container is public; device holds the storage account key — **fix decided 2026-08-25 (D-017), not yet implemented** | Reports, confirmed | 1 |
@@ -36,7 +36,7 @@ Paths are post-restructure. Last verified: 2 August 2026 (F-01…F-24); later en
 | F-16 | MEDIUM | Telemetry CSV writes to a read-only partition — **FIXED 2026-08-13** (nothing writes to `/boot/firmware`) | Reports, confirmed | 1 |
 | F-17 | MEDIUM | Provisioning and SD protection disagree on service user — **FIXED 2026-08-12** | New | 1 |
 | F-18 | MEDIUM | Dashboard downloads everything, every poll | Reports, confirmed | 1 / 2 |
-| F-19 | LOW | Battery alert dedup state lost on reboot — **improved 2026-08-13**; reboot persistence waits on D-002 | Reports, confirmed | 1 |
+| F-19 | LOW | Battery alert dedup state lost on reboot — **CLOSED 2026-10-24 (D-020)**: the battery alert is decided on the backend from the heartbeat's `power.battery_voltage_v`; the device keeps no alert state at all | Reports, confirmed | 1 |
 | F-20 | LOW | Modem admin API queried without authentication | Reports, confirmed | Deferred |
 | **F-21** | **CRITICAL** | **Detector replaced. Arithmetically cannot fire on a sub-second event** — direction confirmed 2026-08-12: keep PSD, second detector coming (D-014) | **New** | **0** |
 | F-22 | HIGH | Archive queue cap exceeds the RAM it lives in — **FIXED 2026-08-12** | New | 1 |
@@ -53,7 +53,8 @@ Paths are post-restructure. Last verified: 2 August 2026 (F-01…F-24); later en
 | F-33 | HIGH | Housekeeping drains and retries could starve the systemd watchdog; WhatsApp retry replayed forever — **FIXED 2026-10-24** | Review | — |
 | F-34 | HIGH | Push-only units received no remote config; a malformed signed config crash-looped behind healthy heartbeats — **FIXED 2026-10-24** | Review | — |
 | F-35 | MEDIUM | A single 401 stopped push and heartbeats until a restart nobody can trigger — **FIXED 2026-10-24** | Review | — |
-| F-36 | MEDIUM | Bench mode shipped as the template default and was about to leave `degraded_reason` with no trace — **FIXED 2026-10-24 (D-019)** | Review | — |
+| F-36 | MEDIUM | Bench mode shipped as the template default and was about to leave `degraded_reason` with no trace — **FIXED 2026-10-24 (D-019)**; the mechanism itself left with Twilio the same day (D-020) | Review | — |
+| F-37 | HIGH | PortAudio's callback-thread creation hangs on Codec Zero (`PaErrorCode -9987`) — **FIXED 2026-10-24** (blocking `_read_loop`); committed as a duplicate "F-29", renumbered | Bench | — |
 | X-01 | — | Report claim that did not survive verification | Correction | Now |
 
 ---
@@ -504,7 +505,9 @@ Fix: `setup.sh`'s generated `oceankind.service` unit now runs the six `amixer -c
 
 **Closed, 2026-10-24.** Re-tested on the original trixie image, same kernel (`6.18.50+rpt-rpi-v8`) the upstream issue was filed against: the mixer fix holds there too, confirmed across a cold reboot. The kernel was never the cause. `QUICKGUIDE.md` reverted to the default Raspberry Pi OS Lite image; the Legacy bookworm detour is no longer needed. [raspberrypi/linux#7692](https://github.com/raspberrypi/linux/issues/7692) is still open upstream and still unexplained on the reporter's end, but it is not this project's bug.
 
-### F-29 — PortAudio's callback-thread creation hangs on Codec Zero — fixed
+### F-37 — PortAudio's callback-thread creation hangs on Codec Zero — fixed
+
+*(Renumbered 2026-10-24: this entry was committed as a second "F-29" while the review's F-29 below — the dead stream reporting itself healthy — already held the number. Same day, same board, different defect.)*
 
 Found immediately after F-28 was fixed: with the mixer correctly enabled and raw `arecord` capturing clean real signal, the actual service still crashed on `source.start()` with `sounddevice.PortAudioError: Error starting stream: Wait timed out [PaErrorCode -9987]`, traced to `PaUnixThread_New(...)` timing out in `pa_linux_alsa.c`.
 
