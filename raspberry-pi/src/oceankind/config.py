@@ -204,6 +204,10 @@ FAILED_REF_FILE       = INSTALL_DIR / ".ota_failed_release"
 ASSIGNED_RELEASE_FILE = INSTALL_DIR / ".assigned_release"
 OTA_LOCK_DIR          = STATE_DIR / "ota.lock"        # el mismo mkdir-lock del script
 OTA_LOG_FILE          = STATE_DIR / "logs" / "update.log"
+# Último lanzamiento, persistido en tmpfs: OTA_RETRIGGER_S vale a través de
+# reinicios del servicio (el OTA nos reinicia; sin esto, cada arranque era un
+# lanzamiento nuevo).
+OTA_LAST_TRIGGER_FILE = STATE_DIR / "ota.last_trigger"
 # Entre dos lanzamientos del OTA por la misma asignación. El script es
 # idempotente y barato sin red, pero un bucle cada 5 min por un tag que no
 # existe sería ruido; media hora deja margen a arreglarlo en el panel.

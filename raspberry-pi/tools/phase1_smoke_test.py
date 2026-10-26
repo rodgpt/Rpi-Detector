@@ -418,6 +418,28 @@ check("launched with --ref <tag> as argv, no shell",
       _ota.maybe_trigger() == "launched" and _launched
       and _launched[-1][1:] == [str(C.OTA_SCRIPT), "--ref", "v2.2.0"])
 check("same assignment inside the cooldown is not relaunched", _ota.maybe_trigger() == "cooldown" and len(_launched) == 1)
+# The OTA restarts this very service, so the cooldown must survive a restart: it
+# is persisted and reloaded at import. Simulate the restart by forgetting the
+# in-memory copy and reloading (F-38: without this the bench looped every 7 s).
+_ota._last_trigger_mono, _ota._last_trigger_ref = 0.0, None
+_ota._load_last_trigger()
+check("cooldown persisted across a service restart", _ota.maybe_trigger() == "cooldown" and len(_launched) == 1)
+# Under systemd the launch is a separate unit, never a child (F-38). A failing
+# `systemctl start` is an error and must NOT fall back to Popen.
+_ota.UNDER_SYSTEMD = True
+_ota._last_trigger_mono = 0.0
+_ran = []
+_real_run = _sp.run
+_sp.run = lambda argv, **kw: (_ran.append(argv), type("R", (), {"returncode": 1, "stderr": "no unit", "stdout": ""})())[1]
+check("systemd: `systemctl start oceankind-ota@<tag>` is what gets called",
+      _ota.maybe_trigger() == "error" and _ran and _ran[-1][:4] == ["sudo", "-n", "systemctl", "start"]
+      and _ran[-1][-1] == "oceankind-ota@v2.2.0.service" and len(_launched) == 1)
+_sp.run = lambda argv, **kw: (_ran.append(argv), type("R", (), {"returncode": 0, "stderr": "", "stdout": ""})())[1]
+_ota._last_trigger_mono = 0.0
+check("systemd: success reports launched without any Popen",
+      _ota.maybe_trigger() == "launched" and len(_launched) == 1)
+_sp.run = _real_run
+_ota.UNDER_SYSTEMD = False
 _ota._last_trigger_mono = 0.0
 C.OTA_LOCK_DIR.mkdir(parents=True, exist_ok=True)
 (C.OTA_LOCK_DIR / "pid").write_text(str(os.getpid()))

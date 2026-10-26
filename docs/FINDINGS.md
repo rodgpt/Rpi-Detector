@@ -55,6 +55,7 @@ Paths are post-restructure. Last verified: 2 August 2026 (F-01…F-24); later en
 | F-35 | MEDIUM | A single 401 stopped push and heartbeats until a restart nobody can trigger — **FIXED 2026-10-24** | Review | — |
 | F-36 | MEDIUM | Bench mode shipped as the template default and was about to leave `degraded_reason` with no trace — **FIXED 2026-10-24 (D-019)**; the mechanism itself left with Twilio the same day (D-020) | Review | — |
 | F-37 | HIGH | PortAudio's callback-thread creation hangs on Codec Zero (`PaErrorCode -9987`) — **FIXED 2026-10-24** (blocking `_read_loop`); committed as a duplicate "F-29", renumbered | Bench | — |
+| F-38 | HIGH | The OTA launched from the service died with the service it restarted; the new instance relaunched it — a 7 s restart loop on the first assigned release — **FIXED 2026-10-24** (own systemd unit; persisted cooldown) | Bench | — |
 | X-01 | — | Report claim that did not survive verification | Correction | Now |
 
 ---
@@ -552,6 +553,14 @@ Fix: both windows are trimmed on read (`duty_cycle_pct`, `audio_health`); `duty_
 ### F-35 — A single 401 silenced the unit until a restart — fixed
 
 `push._auth_failed` latched forever; `post_heartbeat` returned immediately while set. A transient 401 (backend deploying with its database down) left the unit mute with no signal but absence. Fix: the latch lifts once per `AUTH_RETRY_S` (3600 s) for a single probe and re-latches on another 401.
+
+### F-38 — The service-launched OTA was killed by the restart it performed; the bench looped — fixed
+
+Found 2026-10-24 on the bench, first release ever assigned from the panel (D-021). `ota.py` launched `update_oceankind.sh --ref v0.9.1` with `subprocess.Popen(..., start_new_session=True)` and its docstring claimed that put the script out of systemd's reach. It does not: a new session is a new process group, still inside `oceankind.service`'s cgroup, and `KillMode=control-group` (the default) kills every process in it on `systemctl restart`. Sequence in the journal: clone, pip, install (the banner already read `OceanKind 0.9.1`), journal `verifying`, `sudo systemctl restart oceankind` — which killed the script before its 60 s verification could commit. The new service instance polled immediately on start, saw no `.installed_release` and an orphaned lock, launched the script again; the script read the journal in `verifying`, restarted the service to re-verify, and died again. Every seven seconds, indefinitely. The in-memory re-trigger cooldown reset with each process, so it never engaged. The hardware proved what the fault-injection harness could not: its `systemctl` is a stub that kills nothing.
+
+Not silent, at least: the service was up (and listening) between restarts, the journal was full of `OTA lanzada`, and the panel showed the assignment pending. But a unit restarting every seven seconds is deaf for a good fraction of every minute, and a remote unit would have stayed in that loop until somebody noticed the heartbeat flapping.
+
+Fix: under systemd (`INVOCATION_ID` set) the service now runs `sudo systemctl start --no-block oceankind-ota@<tag>.service`, a template unit `setup.sh` installs, so the script lives in its own cgroup; if that fails it reports an error and does **not** fall back to a child process. The last launch time is persisted in tmpfs (`ota.last_trigger`) and reloaded at import, so `OTA_RETRIGGER_S` holds across the restarts the OTA itself causes. `setup.sh` also writes an explicit sudoers drop-in for exactly the five commands the OTA path needs, instead of relying on the imager's blanket NOPASSWD. Smoke §13 covers both the persisted cooldown and the systemd launch path. Recovery on the bench: *Retener* in the panel stopped the loop within one cycle; `bash ~/oceankind/update_oceankind.sh --ref v0.9.1` from an SSH shell finished the journaled verification and committed.
 
 ### F-36 — Bench mode as the default, with its last trace about to disappear — fixed (D-019)
 

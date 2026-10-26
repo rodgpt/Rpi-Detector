@@ -303,6 +303,52 @@ StandardOutput=journal
 StandardError=journal
 OTA_EOF
 
+# The service launches an assigned update through THIS template, as its own
+# transient unit (`systemctl start --no-block oceankind-ota@<tag>.service`),
+# never as a child process: the script restarts oceankind.service to verify the
+# build, and a child — even in its own session — lives in the service's cgroup
+# and dies with it. That produced a 7-second restart loop on the bench on
+# 2026-10-24. %i is the tag; it has already matched the release regex.
+cat > /etc/systemd/system/oceankind-ota@.service << OTA_T_EOF
+[Unit]
+Description=OceanKind OTA — deploy assigned release %i (D-021)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=${SERVICE_USER}
+TimeoutStartSec=1800
+# The log directory is tmpfs and may not exist yet on a unit that has not run
+# protect_sd.sh; systemd opens the append: target before ExecStart runs.
+ExecStartPre=/bin/mkdir -p /tmp/oceankind/logs
+ExecStart=/bin/bash ${OCEANKIND_DIR}/update_oceankind.sh --ref %i
+StandardOutput=append:/tmp/oceankind/logs/update.log
+StandardError=append:/tmp/oceankind/logs/update.log
+OTA_T_EOF
+
+# ── 7d. Exactly the sudo the OTA needs, and nothing else ──────────────────────
+# The service user has to start the OTA unit and the OTA has to restart the
+# service, read its restart counter, toggle the overlay and reboot. Until now
+# this relied on the imager's blanket NOPASSWD for the first user; write it
+# down as a drop-in so a unit provisioned with a locked-down user still works,
+# and so the list of privileged commands is in one place.
+cat > /etc/sudoers.d/oceankind-ota << SUDO_EOF
+# OceanKind OTA (D-021): the service launches updates as their own unit and the
+# update script restarts the service to verify. Installed by setup.sh.
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block oceankind-ota@*.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart oceankind
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart oceankind.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/raspi-config nonint do_overlayfs *
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/sbin/reboot, /sbin/reboot
+SUDO_EOF
+chmod 440 /etc/sudoers.d/oceankind-ota
+if ! visudo -c -f /etc/sudoers.d/oceankind-ota >/dev/null; then
+    echo "ERROR: generated sudoers drop-in is invalid; removing it so sudo keeps working."
+    rm -f /etc/sudoers.d/oceankind-ota
+    exit 1
+fi
+
 cat > /etc/systemd/system/oceankind-ota.timer << TIMER_EOF
 [Unit]
 Description=OceanKind OTA daily convergence (D-021)
